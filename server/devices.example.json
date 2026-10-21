@@ -1,0 +1,41 @@
+{
+  "front-desk-7f3a9c": {
+    "version": 1,
+    "title": "Acme Front Desk",
+    "subtitle": "Main line",
+    "sip": {
+      "username": "frontdesk123456789",
+      "password": "endpoint-password"
+    },
+    "theme": {
+      "dark": true,
+      "primary": "#0B5FFF",
+      "onPrimary": "#FFFFFF",
+      "background": "#0E1116",
+      "onBackground": "#E6E8EB",
+      "surface": "#171B22",
+      "onSurface": "#E6E8EB",
+      "accept": "#1DB954",
+      "decline": "#E5484D"
+    },
+    "dialing": {
+      "countryCode": "1",
+      "allowFreeDial": true
+    },
+    "speedDials": [
+      { "label": "Manager", "number": "+15551230001" },
+      { "label": "Warehouse", "number": "+15551230002" }
+    ],
+    "historyLimit": 200,
+    "adminPin": "2468",
+    "refreshHours": 24
+  },
+  "lobby-kiosk-41bd02": {
+    "title": "Lobby Phone",
+    "sip": { "username": "lobby987654321", "password": "endpoint-password" },
+    "theme": { "dark": false, "primary": "#7A1FA2", "background": "#FFFFFF", "onBackground": "#1A1A1A", "surface": "#F2EEF5", "onSurface": "#1A1A1A" },
+    "dialing": { "allowFreeDial": false },
+    "speedDials": [{ "label": "Reception", "number": "+15551230000" }],
+    "adminPin": "1357"
+  }
+}
