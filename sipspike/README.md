@@ -12,14 +12,13 @@ Setup matches 22 Phone. Scan the Comm Manager QR. The app POSTs that URL
 Long-press the title and enter the admin PIN for reset, or for a hidden
 manual SIP login.
 
-Transport is automatic. REGISTER and INVITE go to the Plivo outbound
-proxy `client.plivo.com`. The registrar and the From address stay
-`phone.plivo.com`.
+Transport is automatic. REGISTER goes only to `phone.plivo.com`. There
+is no outbound proxy on the account.
 
-1. TLS `client.plivo.com:5061`
+1. TLS `phone.plivo.com:5061`
 2. On failure, or on cellular with no IPv4 source (no CLAT), TLS to an AAAA
-   of `client.plivo.com`
-3. Then UDP `client.plivo.com:5060`
+   of `mobile.phone.plivo.com` with the certificate name `phone.plivo.com`
+3. Then UDP `phone.plivo.com:5060`
 
 The transport that succeeds is remembered per network type (wifi, cellular,
 cellular with no IPv4). Details has a manual override. A change of network
@@ -39,9 +38,13 @@ provisioning key, and tokens redacted), DNS, addresses including IPv6 and
 CLAT, transport attempts, REGISTER/INVITE/BYE codes, call state, SDP, and
 RTP packet counts. An outbound call logs the normalized digits, the full
 INVITE (Authorization redacted), and every response code. The request URI
-is `sip:<digits>@phone.plivo.com;transport=tls`. Ten-digit numbers get the
-provisioned country code `1`. 22 Phone sends no X-PH headers, and neither
-does this app.
+is `sip:<digits>@phone.plivo.com;transport=tls` so it uses the registered
+TLS connection. Ten-digit numbers get the provisioned country code `1`.
+22 Phone sends no X-PH headers, and neither does this app. Details can
+send that INVITE with a Route to `client.plivo.com:5061` instead. The
+default is the direct path. A direct 403, 404, 480, 484, 488, or 5xx
+before ringing is retried once via that Route when the OPTIONS probe got
+a SIP answer.
 
 PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 are prebuilt for `arm64-v8a`
 with 16 KB page alignment under `src/main/jniLibs`. CI does not compile them.

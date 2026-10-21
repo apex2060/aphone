@@ -2,6 +2,7 @@ package com.twentytwo.phone.sipspike.config
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.twentytwo.phone.sipspike.OutboundRoute
 import com.twentytwo.phone.sipspike.SpikeLog
 import com.twentytwo.phone.sipspike.TransportMode
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,6 +17,7 @@ object ConfigStore {
     private const val KEY_ASKED_BATTERY = "asked_battery"
     private const val KEY_ASKED_FULL_SCREEN = "asked_full_screen"
     private const val KEY_OVERRIDE = "transport_override"
+    private const val KEY_OUTBOUND = "outbound_route"
     private const val KEY_MANUAL_USER = "manual_user"
     private const val KEY_MANUAL_PASS = "manual_pass"
 
@@ -78,6 +80,16 @@ object ConfigStore {
         prefs.edit().apply {
             if (mode == null) remove(KEY_OVERRIDE) else putString(KEY_OVERRIDE, mode.name)
         }.apply()
+    }
+
+    /** Default is the registered phone.plivo.com connection. client.plivo.com is per-call only. */
+    fun outboundRoute(): OutboundRoute =
+        prefs.getString(KEY_OUTBOUND, null)?.let { name ->
+            OutboundRoute.entries.firstOrNull { it.name == name }
+        } ?: OutboundRoute.DIRECT
+
+    fun setOutboundRoute(route: OutboundRoute) {
+        prefs.edit().putString(KEY_OUTBOUND, route.name).apply()
     }
 
     fun winner(signature: String): TransportMode? =

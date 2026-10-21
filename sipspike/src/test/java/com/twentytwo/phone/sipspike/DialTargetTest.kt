@@ -26,13 +26,37 @@ class DialTargetTest {
     }
 
     @Test
-    fun udpRequestAndProxyUsePort5060() {
+    fun udpRequestStaysOnTheRegistrarAndClientRouteIsTlsOnly() {
         assertEquals(
             "sip:14155551212@phone.plivo.com;transport=udp",
             DialTarget.requestUri("14155551212", tls = false),
         )
-        assertEquals("sip:client.plivo.com:5060;transport=udp;lr", DialTarget.proxyUri(tls = false))
         assertEquals("sip:phone.plivo.com:5061;transport=tls", DialTarget.registrarUri(tls = true))
+        assertEquals("sip:client.plivo.com:5061;transport=tls;lr", DialTarget.clientRoute())
+    }
+
+    @Test
+    fun directRejectionRetriesOnlyBeforeRingingWhenTheProbeAnswered() {
+        assertEquals(
+            true,
+            DialTarget.shouldRetryViaClient(OutboundRoute.DIRECT, 404, sawEarly = false, alreadyRetried = false, probeAnswers = true),
+        )
+        assertEquals(
+            false,
+            DialTarget.shouldRetryViaClient(OutboundRoute.DIRECT, 404, sawEarly = true, alreadyRetried = false, probeAnswers = true),
+        )
+        assertEquals(
+            false,
+            DialTarget.shouldRetryViaClient(OutboundRoute.DIRECT, 404, sawEarly = false, alreadyRetried = false, probeAnswers = false),
+        )
+        assertEquals(
+            false,
+            DialTarget.shouldRetryViaClient(OutboundRoute.VIA_CLIENT, 488, sawEarly = false, alreadyRetried = false, probeAnswers = true),
+        )
+        assertEquals(
+            false,
+            DialTarget.shouldRetryViaClient(OutboundRoute.DIRECT, 486, sawEarly = false, alreadyRetried = false, probeAnswers = true),
+        )
     }
 
     @Test

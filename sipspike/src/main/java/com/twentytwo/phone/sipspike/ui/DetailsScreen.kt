@@ -29,6 +29,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -36,6 +39,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.twentytwo.phone.sipspike.ClientProbe
+import com.twentytwo.phone.sipspike.OutboundRoute
 import com.twentytwo.phone.sipspike.SipEngine
 import com.twentytwo.phone.sipspike.TransportMode
 import com.twentytwo.phone.sipspike.config.ConfigStore
@@ -47,6 +52,8 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
     val context = LocalContext.current
     val line by engine.line.collectAsState()
     val selected = ConfigStore.transportOverride()
+    var outbound by remember { mutableStateOf(ConfigStore.outboundRoute()) }
+    val probe by ClientProbe.text.collectAsState()
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp),
@@ -67,6 +74,14 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
                 StatusLine("Notifications", if (SpikeNotifications.notificationsAllowed(context)) "allowed" else "denied")
                 StatusLine("Full-screen alerts", if (SpikeNotifications.canUseFullScreenIntent(context)) "allowed" else "denied")
                 StatusLine("Battery", if (SpikeNotifications.batteryUnrestricted(context)) "unrestricted" else "optimized")
+                Text("Outbound", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
+                OutboundRoute.entries.forEach { route ->
+                    OverrideRow(route.label, outbound == route) {
+                        outbound = route
+                        engine.setOutboundRoute(route)
+                    }
+                }
+                StatusLine("client.plivo.com probe", probe)
                 Text("Transport override", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
                 OverrideRow("Auto", selected == null) { engine.setTransportOverride(null) }
                 TransportMode.entries.forEach { mode ->
