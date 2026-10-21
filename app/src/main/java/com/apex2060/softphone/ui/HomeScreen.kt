@@ -68,6 +68,7 @@ import com.apex2060.softphone.history.CallRecord
 import com.apex2060.softphone.history.Direction
 import com.apex2060.softphone.history.Outcome
 import com.apex2060.softphone.phone.CallPhase
+import com.apex2060.softphone.phone.describesLocalStackFailure
 import com.apex2060.softphone.phone.LineStatus
 import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneManager
@@ -202,6 +203,14 @@ private fun LineStatusDialog(onDismiss: () -> Unit) {
                 StatusLine("Login started", stamp(context, line.loginAttemptAt))
                 StatusLine("Login result at", stamp(context, line.lastRegisterAt))
                 StatusLine("SDK reason", line.lastSdkReason ?: "none")
+                if (describesLocalStackFailure(line.lastRegisterResult) ||
+                    describesLocalStackFailure(line.lastSdkReason)
+                ) {
+                    StatusLine(
+                        "Network",
+                        "This SDK registers on Wi-Fi. It has no IPv6 option, so this cellular network cannot register.",
+                    )
+                }
                 StatusLine(
                     "Last call",
                     if (line.lastCallAt == null) line.lastCallResult else "${line.lastCallResult} · ${stamp(context, line.lastCallAt)}",
@@ -272,6 +281,7 @@ private fun registrationLabel(line: LineStatus): String = when (line.registratio
 }
 
 private fun failureLabel(result: String): String = when {
+    describesLocalStackFailure(result) -> "This network can't register"
     result == "timeout" || result.startsWith("timeout") -> "Timed out, retrying"
     result.startsWith("failed:") -> {
         val reason = result.removePrefix("failed:").substringBefore(" (").take(28)

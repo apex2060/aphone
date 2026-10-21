@@ -94,6 +94,12 @@ object PhoneManager : EventListener {
     private var userDeclined = false
     private var callHookInstalled = false
     private var sawSignalling = false
+    /** Native BYE/CANCEL/reject already requested for the call now on screen. */
+    private var sdkHangupSent = false
+    /** Last REGISTER failed inside the SDK before any SIP response. Wi-Fi can still work. */
+    private var localStackFailure = false
+    private var localStackLogged = false
+    private var lastNetworkKind: String? = null
 
     private var creds: Pair<String, String>? = null
     private var pendingCreds: Pair<String, String>? = null
@@ -200,6 +206,55 @@ object PhoneManager : EventListener {
         }
     }
 
+    /**
+     * The 3.2.2-beta stack binds IPv4 TLS only. There is no setup option for IPv6, UDP, or
+     * the bind address, so an IPv6-only or 464XLAT cellular network cannot be fixed here.
+     * When that failure is followed by a different default network (usually Wi-Fi), drop the
+     * endpoint that already failed to bind and register again. Recreating it on the same
+     * cellular network does not help, so this runs only when the network kind changes.
+     */
+    fun onDefaultNetwork(kind: String) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post { onDefaultNetwork(kind) }
+            return
+        }
+        val changed = lastNetworkKind != null && lastNetworkKind != kind && kind != "none"
+        lastNetworkKind = kind
+        val ep = endpoint
+        if (changed && localStackFailure && ep?.registered != true && activeCall() == null && wantOnline) {
+            Log.i(TAG, "recreating endpoint on network=$kind after a local stack failure")
+            dropEndpoint()
+            main.removeCallbacks(loginTimeout)
+            main.removeCallbacks(retry)
+            lastRefreshAtMs = 0L
+            _registration.value = Registration.FAILED
+            val c = creds
+            if (c != null) {
+                login(c.first, c.second)
+                return
+            }
+        }
+        refreshRegistration("network")
+    }
+
+    private fun dropEndpoint() {
+        val old = endpoint
+        endpoint = null
+        callHookInstalled = false
+        incoming = null
+        outgoing = null
+        runCatching { old?.resetEndpoint() }
+            .onFailure { Log.w(TAG, "resetEndpoint failed: ${it.javaClass.simpleName}") }
+        // resetEndpoint nulls these on success. Clear them anyway so the next
+        // newInstance does not reuse a stack whose bind already failed.
+        runCatching {
+            Endpoint::class.java.getDeclaredField("endpoint").apply { isAccessible = true }.set(null, null)
+        }
+        runCatching {
+            SipController::class.java.getDeclaredField("controller").apply { isAccessible = true }.set(null, null)
+        }
+    }
+
     /** Starts one REGISTER. False means the SDK rejected it immediately. */
     private fun sendLogin(ep: Endpoint): Boolean {
         val c = creds ?: return false
@@ -234,6 +289,7 @@ object PhoneManager : EventListener {
         val detail = lastSdkReason?.take(80)
         lastRegisterResult = if (detail.isNullOrBlank()) "timeout" else "timeout ($detail)"
         lastRegisterAt = System.currentTimeMillis()
+        noteLocalStackFailure(lastRegisterResult)
         Log.w(TAG, "login timed out after ${LOGIN_TIMEOUT_MS / 1000}s ${registrationSnapshot()}")
         scheduleRetry()
     }
@@ -301,6 +357,8 @@ object PhoneManager : EventListener {
         main.removeCallbacks(retry)
         lastRegisterResult = "ok"
         lastRegisterAt = System.currentTimeMillis()
+        localStackFailure = false
+        localStackLogged = false
         retryDelayMs = RETRY_MIN_MS
         _registration.value = Registration.ONLINE
         publishLine()
@@ -331,6 +389,7 @@ object PhoneManager : EventListener {
             else -> "failed:$code ($detail)"
         }.take(180)
         lastRegisterAt = System.currentTimeMillis()
+        noteLocalStackFailure(lastRegisterResult)
         Log.w(TAG, "login failed: $lastRegisterResult user=${creds?.first ?: "-"}")
         main.post {
             publishLine()
@@ -371,6 +430,7 @@ object PhoneManager : EventListener {
         }
         outgoing = out
         sawSignalling = false
+        sdkHangupSent = false
         _call.value = CallState(Direction.OUTGOING, number, CallPhase.DIALING)
         armWatchdog()
         Log.i(TAG, "dial $number sdkCallRunning=${sdkCallRunning()}")
@@ -399,28 +459,17 @@ object PhoneManager : EventListener {
         if (state.phase != CallPhase.RINGING_IN) return
         userDeclined = true
         Log.i(TAG, "decline incoming from=${state.number}")
-        val rejected = runCatching { incoming?.reject() == true }.getOrDefault(false)
-        if (!rejected) {
-            runCatching { controller()?.reject() }
-                .onFailure { Log.w(TAG, "reject failed: ${it.javaClass.simpleName}") }
-        }
         finish(Outcome.DECLINED, "Declined")
     }
 
     fun hangup() {
         val state = _call.value ?: return
         if (state.phase == CallPhase.ENDED) return
-        if (state.phase == CallPhase.RINGING_IN) {
+        if (state.phase == CallPhase.RINGING_IN && state.answeredAt == null) {
             decline()
             return
         }
         Log.i(TAG, "local hangup phase=${state.phase} direction=${state.direction} sdkCallRunning=${sdkCallRunning()}")
-        val sent = runCatching { outgoing?.hangup() == true }.getOrDefault(false) ||
-            runCatching { incoming?.hangup() == true }.getOrDefault(false)
-        if (!sent) {
-            runCatching { controller()?.hangup() }
-                .onFailure { Log.w(TAG, "controller hangup failed: ${it.javaClass.simpleName}") }
-        }
         val answered = state.answeredAt != null
         finish(if (answered) Outcome.COMPLETED else Outcome.FAILED, "Call ended")
     }
@@ -475,11 +524,21 @@ object PhoneManager : EventListener {
      * Records history, drops in-call audio, and clears both the UI call and the SDK's
      * "call running" flag. Idempotent: a late callback cannot resurrect the call or log it twice.
      */
-    @Synchronized
     private fun finish(outcome: Outcome, label: String) {
         val state = _call.value ?: return
         if (state.phase == CallPhase.ENDED) return
-        // Publish ENDED before releasing the SDK. hangup/reset can re-enter this method.
+        // Native BYE/CANCEL/reject before local reset, and outside the teardown lock.
+        // endCall invokes the SDK listener before it returns; that listener calls back
+        // into finish on this thread or the SIP thread.
+        signalSdkHangup(state)
+        synchronized(this) {
+            val current = _call.value ?: return
+            if (current.phase == CallPhase.ENDED || current.startedAt != state.startedAt) return
+            finishLocked(current, outcome, label)
+        }
+    }
+
+    private fun finishLocked(state: CallState, outcome: Outcome, label: String) {
         _call.value = state.copy(phase = CallPhase.ENDED, endedLabel = label, outcome = outcome)
         noteCall("${outcome.name.lowercase()}:$label")
         val runningBefore = sdkCallRunning()
@@ -598,6 +657,7 @@ object PhoneManager : EventListener {
         incoming = inc
         userDeclined = false
         sawSignalling = false
+        sdkHangupSent = false
         _call.value = CallState(Direction.INCOMING, number.ifBlank { "Unknown" }, CallPhase.RINGING_IN)
         armWatchdog()
         Log.i(TAG, "incoming call shown from=$number ${registrationSnapshot()}")
@@ -827,6 +887,50 @@ object PhoneManager : EventListener {
         main.postDelayed(watchdog, WATCHDOG_MS)
     }
 
+    /**
+     * Ask the SDK to end the dialog, then return. Local reset happens only after this.
+     * Outgoing.hangup and SipController.hangup close the PeerConnection before endCall.
+     * Closing it first can mark the native session done, and endCall then returns
+     * without a BYE. Incoming.reject is only for a call that has not been answered;
+     * an answered incoming call must BYE, not reject.
+     */
+    private fun signalSdkHangup(state: CallState) {
+        synchronized(this) {
+            if (sdkHangupSent) return
+            sdkHangupSent = true
+        }
+        val unanswered = state.direction == Direction.INCOMING &&
+            state.phase == CallPhase.RINGING_IN &&
+            state.answeredAt == null
+        if (unanswered) {
+            Log.i(TAG, "sdk reject before teardown from=${state.number}")
+            val rejected = runCatching { incoming?.reject() == true }.getOrDefault(false)
+            if (!rejected) {
+                Log.i(TAG, "Incoming.reject declined; calling SipController.reject")
+                runCatching { controller()?.reject() }
+                    .onFailure { Log.w(TAG, "reject failed: ${it.javaClass.simpleName}") }
+            }
+            return
+        }
+        Log.i(
+            TAG,
+            "sdk endCall before teardown phase=${state.phase} direction=${state.direction} " +
+                "outgoing=${outgoing != null} incoming=${incoming != null}",
+        )
+        // endCall sends the BYE or CANCEL. The leg hangup() also reaches it, but only
+        // after closing the PeerConnection, so it runs after endCall has returned.
+        runCatching { controller()?.endCall() }
+            .onFailure { Log.w(TAG, "endCall failed: ${it.javaClass.simpleName}") }
+        val sent = if (state.direction == Direction.INCOMING) {
+            runCatching { incoming?.hangup() == true }.getOrDefault(false) ||
+                runCatching { outgoing?.hangup() == true }.getOrDefault(false)
+        } else {
+            runCatching { outgoing?.hangup() == true }.getOrDefault(false) ||
+                runCatching { incoming?.hangup() == true }.getOrDefault(false)
+        }
+        if (!sent) Log.i(TAG, "leg hangup did not accept; endCall was already requested")
+    }
+
     private fun releaseSdkCall() {
         val reset = runCatching {
             Class.forName("com.plivo.endpoint.IO").getDeclaredMethod("reset").apply { isAccessible = true }
@@ -835,10 +939,7 @@ object PhoneManager : EventListener {
             outgoing?.let { runCatching { reset.invoke(it) } }
             incoming?.let { runCatching { reset.invoke(it) } }
         }
-        // endCall even when the Java leg never went inactive. Native rejects a new INVITE
-        // with 486 while it still has that session.
-        runCatching { controller()?.hangup() }
-            .onFailure { Log.w(TAG, "session release failed: ${it.javaClass.simpleName}") }
+        closePeerConnection()
         main.post {
             val sc = controller() ?: return@post
             runCatching {
@@ -885,6 +986,29 @@ object PhoneManager : EventListener {
 
     private fun controller(): SipController? =
         endpoint?.let { runCatching { SipController.getInstance(it) }.getOrNull() }
+
+    /** After endCall. [SipController.hangup] closes this first and can drop the BYE. */
+    private fun closePeerConnection() {
+        val sc = controller() ?: return
+        runCatching {
+            val field = SipController::class.java.getDeclaredField("pc").apply { isAccessible = true }
+            val pc = field.get(sc) ?: return@runCatching
+            pc.javaClass.getMethod("close").invoke(pc)
+            field.set(sc, null)
+        }.onFailure { Log.w(TAG, "peer connection close failed: ${it.javaClass.simpleName}") }
+    }
+
+    private fun noteLocalStackFailure(text: String?) {
+        if (!describesLocalStackFailure(text)) return
+        localStackFailure = true
+        if (localStackLogged) return
+        localStackLogged = true
+        Log.w(
+            TAG,
+            "REGISTER failed in the SDK before a SIP response. 3.2.2-beta is IPv4 TLS only " +
+                "and has no transport or IPv6 option. Wi-Fi can register; this cellular network cannot.",
+        )
+    }
 
     private fun signallingPresent(): Boolean? {
         val sc = controller() ?: return null
@@ -955,6 +1079,25 @@ private fun describeInvite(raw: String?): InviteInfo {
         cseq = headers["cseq"]?.take(40),
         headers = headers,
     )
+}
+
+/**
+ * True when the SDK failed while building the REGISTER, before Plivo answered.
+ * The Details text is often the resip pre-send log (`Via: SIP/2.0/ ;branch=...`),
+ * which is empty until a transport is selected. That is not a 401.
+ */
+fun describesLocalStackFailure(text: String?): Boolean {
+    if (text.isNullOrBlank()) return false
+    val r = text.lowercase()
+    return "makeinitialrequest" in r ||
+        "can't find source address" in r ||
+        "cant find source address" in r ||
+        "no transport" in r ||
+        "could not bind" in r ||
+        "incomplete via" in r ||
+        "use_ipv6" in r ||
+        "ipv6 support is not enabled" in r ||
+        "network not initialized" in r
 }
 
 /** Status line or SDK reason code. Authorization and password text are dropped. */
