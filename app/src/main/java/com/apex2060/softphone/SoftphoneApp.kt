@@ -20,6 +20,6 @@ class SoftphoneApp : Application() {
         Recordings.cleanupOrphans(this)
         engine = SipEngine(this)
         engine.start()
-        if (ConfigStore.config.value != null && ConfigStore.phoneEnabled.value) PhoneService.start(this)
+        if (ConfigStore.anyEnabled()) PhoneService.start(this)
     }
 }

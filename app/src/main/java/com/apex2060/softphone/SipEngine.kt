@@ -71,6 +71,8 @@ data class CallUi(
     val startedAt: Long = System.currentTimeMillis(),
     val endedLabel: String? = null,
     val outcome: Outcome? = null,
+    val lineId: String = "",
+    val lineLabel: String = "",
 )
 
 data class LineUi(
@@ -89,8 +91,8 @@ data class LineUi(
 )
 
 /**
- * PJSIP registration and calls. Transport order comes from [TransportPlan].
- * A local hangup sends BYE or CANCEL before the UI call is cleared.
+ * One PJSIP endpoint, one account per phone that is on.
+ * Each account uses the same registrar, NAT, and transport order as the single-line build.
  */
 class SipEngine(private val app: Application) {
     val lines = mutableStateListOf<String>()
@@ -98,8 +100,10 @@ class SipEngine(private val app: Application) {
     val registration: StateFlow<Registration> = _registration.asStateFlow()
     private val _call = MutableStateFlow<CallUi?>(null)
     val call: StateFlow<CallUi?> = _call.asStateFlow()
-    private val _line = MutableStateFlow(LineUi())
-    val line: StateFlow<LineUi> = _line.asStateFlow()
+    private val _statuses = MutableStateFlow<Map<String, LineUi>>(emptyMap())
+    val statuses: StateFlow<Map<String, LineUi>> = _statuses.asStateFlow()
+    private val _network = MutableStateFlow("")
+    val network: StateFlow<String> = _network.asStateFlow()
 
     private val main = Handler(app.mainLooper)
     private val thread = HandlerThread("sipspike-pjsip")
@@ -107,30 +111,13 @@ class SipEngine(private val app: Application) {
     private val audio = app.getSystemService(AudioManager::class.java)
     private val foregroundCount = AtomicInteger(0)
 
-    @Volatile private var wantRegister = false
-    @Volatile private var powerToken = 0
-    @Volatile private var username = ""
-    @Volatile private var generation = 0
-    private var attemptToken = 0
-    private var plan = emptyList<TransportMode>()
-    private var planIndex = -1
-    private var planSig = ""
-    private var planHasIpv4 = true
-    private var currentMode: TransportMode? = null
-    private var sawAuth = false
-    private var registeredOk = false
-    private var attempting = false
-    private var closing = false
-    private var timeout: Runnable? = null
-    private var retry: Runnable? = null
-
+    private val regs = LinkedHashMap<String, RegLine>()
     private var ep: SpikeEndpoint? = null
-    private var account: SpikeAccount? = null
     private var logWriter: RedactingLog? = null
+    private var nativeError: String? = null
     @Volatile private var callObj: SpikeCall? = null
     /** Strong refs so the GC cannot finalize a Call and hang it up. */
     private val liveCalls = ArrayList<SpikeCall>()
-    @Volatile private var pendingReregister = false
     private val loggedResponses = HashSet<String>()
     private var sawEarly = false
     private var triedClient = false
@@ -139,12 +126,35 @@ class SipEngine(private val app: Application) {
     private var audioIndex = -1
     private var signaled = false
     private var uiCleared = false
+    private var closingCall = false
     private var focus: AudioFocusRequest? = null
     private var rtpQuietLogs = 0
     private var lastRtpIn = -1L
     private var lastRtpOut = -1L
     private var pendingNet = "change"
     private var seenNetKey = ""
+
+    private class RegLine(val id: String) {
+        @Volatile var wantRegister = false
+        @Volatile var powerToken = 0
+        @Volatile var username = ""
+        @Volatile var password = ""
+        @Volatile var generation = 0
+        @Volatile var registeredOk = false
+        @Volatile var attempting = false
+        var attemptToken = 0
+        var plan: List<TransportMode> = emptyList()
+        var planIndex = -1
+        var planSig = ""
+        var planHasIpv4 = true
+        var currentMode: TransportMode? = null
+        var sawAuth = false
+        var closing = false
+        var timeout: Runnable? = null
+        var retry: Runnable? = null
+        var account: SpikeAccount? = null
+        @Volatile var pendingReregister = false
+    }
 
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = scheduleNet("available")
@@ -168,9 +178,8 @@ class SipEngine(private val app: Application) {
                 if (extra > 0) lines.removeRange(0, extra)
             }
         }
-        val nativeError = loadNative()
+        nativeError = loadNative()
         if (nativeError != null) {
-            _line.value = LineUi(status = "Native library failed to load", nativeError = nativeError)
             SpikeLog.append("native load failed: $nativeError")
         }
     }
@@ -183,13 +192,13 @@ class SipEngine(private val app: Application) {
             SpikeLog.append("network callback: ${e.message}")
         }
         publishNet(NetInfo.snapshot(app))
-        if (ConfigStore.phoneEnabled.value) ClientProbe.startOnce()
+        if (ConfigStore.anyEnabled()) ClientProbe.startOnce()
     }
 
-    fun setOutboundRoute(route: OutboundRoute) {
-        ConfigStore.setOutboundRoute(route)
+    fun setOutboundRoute(lineId: String, route: OutboundRoute) {
+        ConfigStore.setOutboundRoute(lineId, route)
         SpikeLog.append("outbound route ${route.label}")
-        _line.value = _line.value.copy(outbound = route.uiLabel)
+        publishTransport(lineId)
     }
 
     fun onActivityStarted() { foregroundCount.incrementAndGet() }
@@ -202,124 +211,76 @@ class SipEngine(private val app: Application) {
         main.post { lines.clear() }
     }
 
-    fun login(user: String, pass: String) {
-        if (!ConfigStore.phoneEnabled.value) {
-            wantRegister = false
-            SpikeLog.append("login skipped, phone is off")
-            setReg(Registration.OFFLINE, "Phone is off")
-            return
-        }
-        powerToken++
-        ClientProbe.startOnce()
-        if (_line.value.nativeError != null) {
-            setReg(Registration.FAILED, "Native library failed to load")
-            return
-        }
-        SpikeLog.noteSecret(pass)
-        ConfigStore.ticket?.key?.let { SpikeLog.noteSecret(it) }
-        username = user.trim()
-        wantRegister = true
-        setReg(Registration.CONNECTING, "Connecting…")
-        pjsip.post { beginChain() }
+    /** Registers every phone that is on. Same credentials and an in-flight attempt are left alone. */
+    fun syncEnabledLines() {
+        pjsip.post { syncOnThread() }
     }
 
     /**
-     * REGISTER with Expires 0, then tear the stack down. The register plan
-     * itself is unchanged; this only stops it.
+     * REGISTER with Expires 0 for this phone only, then drop its account.
+     * Other phones keep their accounts.
      */
-    fun turnOff() {
-        wantRegister = false
-        val token = ++powerToken
-        cancelRetry()
-        pjsip.post {
-            if (token != powerToken || wantRegister) return@post
-            generation++
-            attemptToken++
-            cancelTimeout()
-            val acc = account
-            val wait = acc != null && registeredOk
-            if (wait) {
-                try {
-                    acc?.setRegistration(false)
-                    SpikeLog.append("unregister sent (Expires 0)")
-                } catch (e: Exception) {
-                    SpikeLog.append("unregister failed: ${e.message}")
-                }
-            } else {
-                SpikeLog.append("phone off, not registered")
-            }
-            val finish = Runnable {
-                if (token != powerToken || wantRegister) return@Runnable
-                destroyStack()
-                registeredOk = false
-                attempting = false
-                main.post {
-                    _registration.value = Registration.OFFLINE
-                    _call.value = null
-                    _line.value = _line.value.copy(
-                        registration = Registration.OFFLINE,
-                        status = "Phone is off",
-                    )
-                }
-            }
-            if (wait) pjsip.postDelayed(finish, 2_000) else finish.run()
-        }
-    }
-
-    fun logout() {
-        wantRegister = false
-        powerToken++
-        cancelRetry()
-        pjsip.post {
-            generation++
-            attemptToken++
-            cancelTimeout()
-            destroyStack()
-            main.post {
-                _registration.value = Registration.OFFLINE
-                _call.value = null
-                _line.value = _line.value.copy(registration = Registration.OFFLINE, status = "Offline", username = "")
-            }
-        }
+    fun turnOff(lineId: String) {
+        pjsip.post { stopLine(lineId) }
     }
 
     fun refreshRegistration(reason: String) {
         pjsip.post {
-            if (!wantRegister) return@post
             val key = netKey(NetInfo.snapshot(app))
-            if (reason != "timer" && registeredOk && ep != null && key == seenNetKey) {
-                SpikeLog.append("refresh $reason skipped, network unchanged ($key)")
-                return@post
-            }
-            SpikeLog.append("refresh $reason")
-            if (registeredOk && ep != null) {
-                try {
-                    account?.setRegistration(true)
-                } catch (e: Exception) {
-                    SpikeLog.append("refresh failed: ${e.message}")
+            var acted = false
+            for (reg in regs.values.toList()) {
+                if (!reg.wantRegister) continue
+                if (reason != "timer" && reg.registeredOk && ep != null && key == seenNetKey) continue
+                acted = true
+                SpikeLog.append("refresh $reason")
+                if (reg.registeredOk && ep != null) {
+                    try {
+                        reg.account?.setRegistration(true)
+                    } catch (e: Exception) {
+                        SpikeLog.append("refresh failed: ${e.message}")
+                    }
+                } else if (!reg.attempting) {
+                    beginChain(reg)
                 }
-            } else if (!attempting) {
-                beginChain()
+            }
+            if (!acted && regs.values.any { it.wantRegister }) {
+                SpikeLog.append("refresh $reason skipped, network unchanged ($key)")
             }
         }
     }
 
-    fun setTransportOverride(mode: TransportMode?) {
-        ConfigStore.setTransportOverride(mode)
+    fun setTransportOverride(lineId: String, mode: TransportMode?) {
+        ConfigStore.setTransportOverride(lineId, mode)
         SpikeLog.append("transport override ${mode?.label ?: "auto"}")
-        publishTransport()
-        if (wantRegister) pjsip.post { beginChain() }
+        publishTransport(lineId)
+        pjsip.post {
+            val reg = regs[lineId] ?: return@post
+            if (reg.wantRegister) beginChain(reg)
+        }
     }
 
-    fun normalize(raw: String): String =
-        DialTarget.normalize(raw, ConfigStore.config.value?.countryCode)
+    fun normalize(raw: String, lineId: String? = null): String {
+        val code = lineId?.let { ConfigStore.line(it)?.config?.countryCode }
+            ?: ConfigStore.themeLine()?.config?.countryCode
+        return DialTarget.normalize(raw, code)
+    }
 
-    fun dial(raw: String): Boolean {
-        if (_registration.value != Registration.ONLINE) return false
+    fun dial(raw: String, lineId: String): Boolean {
+        val stored = ConfigStore.line(lineId) ?: return false
+        if (!stored.enabled) return false
+        val reg = regs[lineId]
+        if (reg == null || !reg.registeredOk) return false
         if (_call.value != null && _call.value?.phase != CallPhase.ENDED) return false
-        val number = normalize(raw)
+        val number = normalize(raw, lineId)
         if (number.isEmpty()) return false
-        val ui = CallUi(Direction.OUTGOING, number, CallPhase.DIALING)
+        ConfigStore.setLastDial(lineId)
+        val ui = CallUi(
+            direction = Direction.OUTGOING,
+            number = number,
+            phase = CallPhase.DIALING,
+            lineId = lineId,
+            lineLabel = stored.config.title,
+        )
         _call.value = ui
         signaled = false
         uiCleared = false
@@ -327,11 +288,10 @@ class SipEngine(private val app: Application) {
         sawEarly = false
         triedClient = false
         callRecording.reset()
-        val cfg = ConfigStore.config.value
-        val route = ConfigStore.outboundRoute()
+        val route = stored.route()
         SpikeLog.append(
-            "dial digits=$number country=${cfg?.countryCode ?: "none"} " +
-                "allowFreeDial=${cfg?.allowFreeDial != false} route=${route.label}"
+            "dial digits=$number country=${stored.config.countryCode ?: "none"} " +
+                "allowFreeDial=${stored.config.allowFreeDial} route=${route.label}"
         )
         pjsip.post { placeCall(ui, viaClient = route == OutboundRoute.VIA_CLIENT) }
         return true
@@ -348,8 +308,6 @@ class SipEngine(private val app: Application) {
             }
             prepareAudio("answer")
             try {
-                // true fills audioCount=1. The no-arg constructor leaves it 0 and
-                // pjsua then omits the audio answer.
                 val prm = CallOpParam(true)
                 prm.statusCode = 200
                 prm.opt.audioCount = 1
@@ -417,9 +375,86 @@ class SipEngine(private val app: Application) {
         }
     }
 
+    private fun syncOnThread() {
+        val wanted = ConfigStore.lines.value.mapNotNull { line ->
+            if (!line.enabled) return@mapNotNull null
+            val creds = line.resolvedCreds() ?: return@mapNotNull null
+            line.id to creds
+        }
+        val ids = wanted.map { it.first }.toSet()
+        if (wanted.isNotEmpty()) ClientProbe.startOnce()
+        for ((id, creds) in wanted) {
+            val reg = regs.getOrPut(id) { RegLine(id) }
+            if (reg.wantRegister && reg.username == creds.first && reg.password == creds.second &&
+                (reg.registeredOk || reg.attempting)
+            ) {
+                continue
+            }
+            startLine(reg, creds.first, creds.second)
+        }
+        for (id in regs.keys.toList()) {
+            if (id !in ids) stopLine(id)
+        }
+    }
+
+    private fun startLine(reg: RegLine, user: String, pass: String) {
+        if (nativeError != null) {
+            setLineReg(reg.id, Registration.FAILED, "Native library failed to load")
+            return
+        }
+        reg.powerToken++
+        SpikeLog.noteSecret(pass)
+        ConfigStore.line(reg.id)?.ticketKey?.let { SpikeLog.noteSecret(it) }
+        reg.username = user.trim()
+        reg.password = pass
+        reg.wantRegister = true
+        SpikeLog.append("login ${reg.username}")
+        setLineReg(reg.id, Registration.CONNECTING, "Connecting…")
+        beginChain(reg)
+    }
+
+    private fun stopLine(lineId: String) {
+        val reg = regs[lineId]
+        if (reg == null || (!reg.wantRegister && reg.account == null && !reg.attempting)) {
+            setLineReg(lineId, Registration.OFFLINE, "Off")
+            maybeDestroyEndpoint()
+            return
+        }
+        reg.wantRegister = false
+        val token = ++reg.powerToken
+        cancelRetry(reg)
+        reg.generation++
+        reg.attemptToken++
+        cancelTimeout(reg)
+        val wait = reg.account != null && reg.registeredOk
+        if (wait) {
+            try {
+                reg.account?.setRegistration(false)
+                SpikeLog.append("unregister sent (Expires 0)")
+            } catch (e: Exception) {
+                SpikeLog.append("unregister failed: ${e.message}")
+            }
+        } else {
+            SpikeLog.append("phone off, not registered")
+        }
+        val finish = Runnable {
+            if (token != reg.powerToken || reg.wantRegister) return@Runnable
+            if (callOn(lineId)) tearDownActiveCall("local-stack-teardown")
+            dropAccount(reg)
+            reg.registeredOk = false
+            reg.attempting = false
+            reg.currentMode = null
+            clearPinIfUnused()
+            maybeDestroyEndpoint()
+            setLineReg(lineId, Registration.OFFLINE, "Off")
+        }
+        if (wait) pjsip.postDelayed(finish, 2_000) else finish.run()
+    }
+
     private fun placeCall(ui: CallUi, viaClient: Boolean) {
-        val acc = account
-        if (acc == null || !registeredOk) {
+        val reg = regs[ui.lineId]
+        val acc = reg?.account
+        if (reg == null || acc == null || !reg.registeredOk) {
             SpikeLog.append("INVITE blocked: not registered")
             main.post { _call.value = null }
             return
@@ -432,7 +467,7 @@ class SipEngine(private val app: Application) {
             next = SpikeCall(acc, this, incoming = false)
             retain(next)
             if (viaClient) triedClient = true
-            val tls = viaClient || currentMode != TransportMode.UDP
+            val tls = viaClient || reg.currentMode != TransportMode.UDP
             val target = DialTarget.requestUri(ui.number, tls)
             val prm = CallOpParam(true)
             prm.opt.audioCount = 1
@@ -442,16 +477,16 @@ class SipEngine(private val app: Application) {
                 route.hName = "Route"
                 route.hValue = "<${DialTarget.clientRoute()}>"
                 tx.headers.add(route)
-                tx.localUri = "sip:$username@${DialTarget.DOMAIN}"
+                tx.localUri = "sip:${reg.username}@${DialTarget.DOMAIN}"
                 prm.txOption = tx
-                if (currentMode == TransportMode.UDP) {
+                if (reg.currentMode == TransportMode.UDP) {
                     SpikeLog.append("via client.plivo.com uses TLS; this registration is UDP")
                 }
             }
             next.makeCall(target, prm)
             SpikeLog.append(
                 "INVITE $target audioCount=${prm.opt.audioCount} " +
-                    "from=sip:$username@${DialTarget.DOMAIN} " +
+                    "from=sip:${reg.username}@${DialTarget.DOMAIN} " +
                     if (viaClient) "route=<${DialTarget.clientRoute()}>" else "route=none"
             )
         } catch (e: Exception) {
@@ -468,121 +503,127 @@ class SipEngine(private val app: Application) {
         }
     }
 
-    private fun beginChain() {
-        if (!wantRegister || username.isEmpty()) return
-        val pass = ConfigStore.resolvedCreds()?.second ?: return
-        SpikeLog.noteSecret(pass)
-        val gen = ++generation
-        attemptToken++
-        cancelTimeout()
-        cancelRetry()
-        destroyStack()
-        registeredOk = false
-        attempting = true
-        sawAuth = false
+    private fun beginChain(reg: RegLine) {
+        if (!reg.wantRegister || reg.username.isEmpty() || reg.password.isEmpty()) return
+        SpikeLog.noteSecret(reg.password)
+        val gen = ++reg.generation
+        reg.attemptToken++
+        cancelTimeout(reg)
+        cancelRetry(reg)
+        if (callOn(reg.id)) tearDownActiveCall("local-stack-teardown")
+        dropAccount(reg)
+        reg.registeredOk = false
+        reg.attempting = true
+        reg.sawAuth = false
         val net = NetInfo.snapshot(app)
         publishNet(net)
         SpikeLog.append(net.detail)
         logDns("phone.plivo.com")
         logDns(DialTarget.PROXY_HOST)
         logDns("mobile.phone.plivo.com")
-        planSig = TransportPlan.signature(net.summary, net.hasIpv4)
-        seenNetKey = TransportPlan.networkKey(planSig, net.addresses)
-        planHasIpv4 = net.hasIpv4
-        val remembered = ConfigStore.winner(planSig)
-        val override = ConfigStore.transportOverride()
-        plan = TransportPlan.attempts(planSig, remembered, override)
-        planIndex = -1
+        reg.planSig = TransportPlan.signature(net.summary, net.hasIpv4)
+        seenNetKey = TransportPlan.networkKey(reg.planSig, net.addresses)
+        reg.planHasIpv4 = net.hasIpv4
+        val stored = ConfigStore.line(reg.id)
+        val remembered = stored?.winner(reg.planSig)
+        val override = stored?.transportMode()
+        reg.plan = TransportPlan.attempts(reg.planSig, remembered, override)
+        reg.planIndex = -1
         SpikeLog.append(
-            "network signature=$planSig remembered=${remembered?.label ?: "none"} " +
+            "network signature=${reg.planSig} remembered=${remembered?.label ?: "none"} " +
                 "override=${override?.label ?: "auto"}"
         )
-        SpikeLog.append("transport plan " + plan.joinToString(" -> ") { it.label })
-        publishTransport()
-        setReg(Registration.CONNECTING, "Connecting…")
-        advance(gen)
+        SpikeLog.append("transport plan " + reg.plan.joinToString(" -> ") { it.label })
+        publishTransport(reg.id)
+        setLineReg(reg.id, Registration.CONNECTING, "Connecting…")
+        advance(reg, gen)
     }
 
-    private fun advance(gen: Int) {
-        if (gen != generation || !wantRegister) return
-        planIndex++
-        if (planIndex >= plan.size) {
-            attempting = false
-            val override = ConfigStore.transportOverride() != null
+    private fun advance(reg: RegLine, gen: Int) {
+        if (gen != reg.generation || !reg.wantRegister) return
+        reg.planIndex++
+        if (reg.planIndex >= reg.plan.size) {
+            reg.attempting = false
+            val override = ConfigStore.line(reg.id)?.transportMode() != null
             val why = if (override) "Override transport failed" else "All transports failed"
-            setReg(Registration.FAILED, why)
+            setLineReg(reg.id, Registration.FAILED, why)
             SpikeLog.append("$why; retry in 30s")
-            scheduleRetry(gen)
+            scheduleRetry(reg, gen)
             return
         }
-        val mode = plan[planIndex]
-        val token = ++attemptToken
-        currentMode = mode
-        sawAuth = false
-        SpikeLog.append("transport attempt ${planIndex + 1}/${plan.size} ${mode.label}")
-        publishTransport()
+        val mode = reg.plan[reg.planIndex]
+        val token = ++reg.attemptToken
+        reg.currentMode = mode
+        reg.sawAuth = false
+        SpikeLog.append("transport attempt ${reg.planIndex + 1}/${reg.plan.size} ${mode.label}")
+        publishTransport(reg.id)
         try {
-            startOne(mode, pass())
-            armTimeout(gen, token, mode)
+            startOne(reg, mode, reg.password)
+            armTimeout(reg, gen, token, mode)
         } catch (e: Exception) {
             SpikeLog.append("transport setup failed ${mode.label}: ${e.message}")
-            destroyStack()
-            if (token == attemptToken) advance(gen)
+            dropAccount(reg)
+            if (token == reg.attemptToken) advance(reg, gen)
         }
     }
 
-    private fun pass(): String = ConfigStore.resolvedCreds()?.second.orEmpty()
-
-    private fun startOne(mode: TransportMode, password: String) {
-        val net = NetInfo.snapshot(app)
-        val ca = caFile()
-        if (mode == TransportMode.TLS_IPV6) {
-            val v6 = resolveAaaa()
-            if (!AddrOverride.set("phone.plivo.com", v6)) {
-                throw IllegalStateException("Could not pin phone.plivo.com to $v6")
-            }
-            SpikeLog.append("pinned phone.plivo.com -> $v6 (AAAA of mobile.phone.plivo.com); TLS name phone.plivo.com")
-        } else {
-            AddrOverride.set(null, null)
-            SpikeLog.append("DNS override cleared")
-        }
-
+    /**
+     * The endpoint and its UDP, TLS, and IPv6 TLS transports are created once.
+     * A later account does not tear them down.
+     */
+    private fun ensureEndpoint() {
+        if (ep != null) return
         val writer = RedactingLog()
-        logWriter = writer
         val endpoint = SpikeEndpoint(this)
+        try {
+            endpoint.libCreate()
+            val cfg = EpConfig()
+            cfg.logConfig.level = 5
+            cfg.logConfig.consoleLevel = 5
+            cfg.logConfig.writer = writer
+            writer.swigReleaseOwnership()
+            cfg.uaConfig.userAgent = "22SIPTest/${BuildConfig.VERSION_NAME}"
+            cfg.uaConfig.natTypeInSdp = 1
+            cfg.medConfig.clockRate = 16000
+            cfg.medConfig.sndClockRate = 16000
+            cfg.medConfig.noVad = true
+            endpoint.libInit(cfg)
+            val ca = caFile()
+            createTransport(endpoint, pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, ca, tls = true)
+            createTransport(endpoint, pjsip_transport_type_e.PJSIP_TRANSPORT_TLS6, ca, tls = true)
+            createTransport(endpoint, pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, ca, tls = false)
+            endpoint.libStart()
+            tuneCodecs(endpoint)
+        } catch (e: Exception) {
+            try { endpoint.libDestroy() } catch (_: Exception) {}
+            try { endpoint.delete() } catch (_: Exception) {}
+            throw e
+        }
+        logWriter = writer
         ep = endpoint
-        endpoint.libCreate()
-        val cfg = EpConfig()
-        cfg.logConfig.level = 5
-        cfg.logConfig.consoleLevel = 5
-        cfg.logConfig.writer = writer
-        writer.swigReleaseOwnership()
-        cfg.uaConfig.userAgent = "22SIPTest/${BuildConfig.VERSION_NAME}"
-        // Default is already 1. Without a STUN server this never learns a NAT type,
-        // so it does not add a useful a=X-nat line. Contact and SDP rewrite do the work.
-        cfg.uaConfig.natTypeInSdp = 1
-        cfg.medConfig.clockRate = 16000
-        cfg.medConfig.sndClockRate = 16000
-        cfg.medConfig.noVad = true
-        endpoint.libInit(cfg)
+    }
 
-        val tp = TransportConfig()
-        tp.port = 0
-        if (mode != TransportMode.UDP) {
-            tp.tlsConfig.verifyServer = true
-            tp.tlsConfig.caListFile = ca.absolutePath
-            tp.tlsConfig.msecTimeout = 15_000
+    private fun createTransport(endpoint: Endpoint, type: Int, ca: File, tls: Boolean) {
+        try {
+            val tp = TransportConfig()
+            tp.port = 0
+            if (tls) {
+                tp.tlsConfig.verifyServer = true
+                tp.tlsConfig.caListFile = ca.absolutePath
+                tp.tlsConfig.msecTimeout = 15_000
+            }
+            endpoint.transportCreate(type, tp)
+            SpikeLog.append("transport created type=$type")
+        } catch (e: Exception) {
+            SpikeLog.append("transport create failed type=$type: ${e.message}")
         }
-        val type = when (mode) {
-            TransportMode.TLS_IPV4 -> pjsip_transport_type_e.PJSIP_TRANSPORT_TLS
-            TransportMode.TLS_IPV6 -> pjsip_transport_type_e.PJSIP_TRANSPORT_TLS6
-            TransportMode.UDP -> pjsip_transport_type_e.PJSIP_TRANSPORT_UDP
-        }
-        endpoint.transportCreate(type, tp)
-        endpoint.libStart()
-        tuneCodecs(endpoint)
+    }
 
-        val hasV4 = net.hasIpv4 || planHasIpv4
+    private fun startOne(reg: RegLine, mode: TransportMode, password: String) {
+        val net = NetInfo.snapshot(app)
+        applyPin(reg, mode)
+        ensureEndpoint()
+        val hasV4 = net.hasIpv4 || reg.planHasIpv4
         val mediaIpv6 = if (mode == TransportMode.TLS_IPV6 && !hasV4) {
             pjsua_ipv6_use.PJSUA_IPV6_ENABLED_USE_IPV6_ONLY
         } else {
@@ -599,108 +640,163 @@ class SipEngine(private val app: Application) {
 
         val accCfg = AccountConfig()
         val tls = mode != TransportMode.UDP
-        accCfg.idUri = "sip:$username@${DialTarget.DOMAIN}"
+        accCfg.idUri = "sip:${reg.username}@${DialTarget.DOMAIN}"
         accCfg.regConfig.registrarUri = DialTarget.registrarUri(tls)
         accCfg.regConfig.timeoutSec = 120
         accCfg.regConfig.retryIntervalSec = 300
-        accCfg.sipConfig.authCreds.add(AuthCredInfo("digest", "*", username, 0, password))
+        accCfg.sipConfig.authCreds.add(AuthCredInfo("digest", "*", reg.username, 0, password))
         accCfg.sipConfig.ipv6Use = sipIpv6
         accCfg.natConfig.iceEnabled = false
         accCfg.natConfig.contactRewriteUse = 1
-        // 2 = rewrite Contact without unregistering first, 4 = always update when Via changes.
-        // The extra REGISTER after a 401 (public address learned from Via) is this, and it
-        // is what makes the Contact reachable from behind CGNAT.
         accCfg.natConfig.contactRewriteMethod = 2 or 4
         accCfg.natConfig.viaRewriteUse = 1
         accCfg.natConfig.sdpNatRewriteUse = 1
         accCfg.natConfig.sipOutboundUse = 1
-        // Account keepalive is UDP-only unless the registrar returns Flow-Timer.
-        // TLS CRLF keepalive is the transport default (about 90s) and stays on.
         accCfg.natConfig.udpKaIntervalSec = 15
         accCfg.mediaConfig.srtpUse = pjmedia_srtp_use.PJMEDIA_SRTP_DISABLED
         accCfg.mediaConfig.srtpSecureSignaling = 0
         accCfg.mediaConfig.ipv6Use = mediaIpv6
-        // This libpjsua2.so is built with PJMEDIA_STREAM_ENABLE_KA=0, so pjsua2
-        // drops the flag. VAD off on G.711 is what keeps RTP flowing in silence.
         accCfg.mediaConfig.streamKaEnabled = true
         SpikeLog.append(
             "nat contactRewrite=1 method=6 viaRewrite=1 sdpNatRewrite=1 " +
                 "sipOutbound=1 udpKa=15s tlsKa=default natTypeInSdp=1 (no STUN, so no learned NAT type) " +
                 "streamKa=compiled-out vad=off"
         )
-        val acc = SpikeAccount(this)
+        val acc = SpikeAccount(this, reg.id, reg.generation)
         acc.create(accCfg, true)
-        account = acc
+        reg.account = acc
         SpikeLog.append(
             "account created registrar=${accCfg.regConfig.registrarUri} proxy=none from=${accCfg.idUri}"
         )
     }
 
-    private fun win(mode: TransportMode) {
-        if (registeredOk && _registration.value == Registration.ONLINE) return
-        registeredOk = true
-        attempting = false
-        cancelTimeout()
-        cancelRetry()
-        ConfigStore.remember(planSig, mode)
-        SpikeLog.append("transport won ${mode.label} on $planSig")
-        setReg(Registration.ONLINE, "Registered")
-        publishTransport()
+    /**
+     * The DNS pin is process-wide. A phone on a different transport must not
+     * retarget the host another phone is already registered through.
+     */
+    private fun applyPin(reg: RegLine, mode: TransportMode) {
+        val others = regs.values.filter { other ->
+            other !== reg && other.account != null && (other.registeredOk || other.attempting)
+        }
+        if (mode == TransportMode.TLS_IPV6) {
+            if (others.any { it.currentMode != null && it.currentMode != TransportMode.TLS_IPV6 }) {
+                throw IllegalStateException("IPv6 pin skipped; another phone is on a different transport")
+            }
+            val v6 = resolveAaaa()
+            if (!AddrOverride.set("phone.plivo.com", v6)) {
+                throw IllegalStateException("Could not pin phone.plivo.com to $v6")
+            }
+            SpikeLog.append(
+                "pinned phone.plivo.com -> $v6 (AAAA of mobile.phone.plivo.com); TLS name phone.plivo.com"
+            )
+        } else {
+            if (others.any { it.currentMode == TransportMode.TLS_IPV6 }) {
+                throw IllegalStateException("DNS clear skipped; another phone is using the IPv6 pin")
+            }
+            AddrOverride.set(null, null)
+            SpikeLog.append("DNS override cleared")
+        }
     }
 
-    private fun failTransport(gen: Int, token: Int, why: String) {
-        if (gen != generation || token != attemptToken) return
-        attemptToken++
-        cancelTimeout()
-        if (registeredOk && ConfigStore.transportOverride() == null) {
+    private fun win(reg: RegLine, mode: TransportMode) {
+        if (reg.registeredOk) return
+        reg.registeredOk = true
+        reg.attempting = false
+        cancelTimeout(reg)
+        cancelRetry(reg)
+        ConfigStore.remember(reg.id, reg.planSig, mode)
+        SpikeLog.append("transport won ${mode.label} on ${reg.planSig}")
+        setLineReg(reg.id, Registration.ONLINE, "Registered")
+        publishTransport(reg.id)
+    }
+
+    private fun failTransport(reg: RegLine, gen: Int, token: Int, why: String) {
+        if (gen != reg.generation || token != reg.attemptToken) return
+        reg.attemptToken++
+        cancelTimeout(reg)
+        val override = ConfigStore.line(reg.id)?.transportMode() != null
+        if (reg.registeredOk && !override) {
             SpikeLog.append("registered transport failed: $why")
-            registeredOk = false
-            ConfigStore.forget(planSig)
-            beginChain()
+            reg.registeredOk = false
+            ConfigStore.forget(reg.id, reg.planSig)
+            beginChain(reg)
             return
         }
-        SpikeLog.append("transport failed ${currentMode?.label ?: "?"}: $why")
-        destroyStack()
-        if (ConfigStore.transportOverride() != null) {
-            attempting = false
-            setReg(Registration.FAILED, why)
-            scheduleRetry(gen)
+        SpikeLog.append("transport failed ${reg.currentMode?.label ?: "?"}: $why")
+        if (callOn(reg.id)) tearDownActiveCall("local-stack-teardown")
+        dropAccount(reg)
+        if (override) {
+            reg.attempting = false
+            setLineReg(reg.id, Registration.FAILED, why)
+            scheduleRetry(reg, gen)
             return
         }
-        advance(gen)
+        advance(reg, gen)
     }
 
-    private fun armTimeout(gen: Int, token: Int, mode: TransportMode) {
+    private fun dropAccount(reg: RegLine) {
+        reg.closing = true
+        try { reg.account?.shutdown() } catch (_: Exception) {}
+        try { reg.account?.delete() } catch (_: Exception) {}
+        reg.account = null
+        reg.closing = false
+    }
+
+    private fun endpointBusy(): Boolean =
+        regs.values.any { it.wantRegister || it.attempting || it.account != null }
+
+    private fun maybeDestroyEndpoint() {
+        if (endpointBusy()) return
+        val endpoint = ep ?: return
+        ep = null
+        try { endpoint.libDestroy() } catch (e: Exception) {
+            SpikeLog.append("libDestroy: ${e.message}")
+        }
+        try { endpoint.delete() } catch (_: Exception) {}
+        logWriter = null
+        try { AddrOverride.set(null, null) } catch (_: UnsatisfiedLinkError) {}
+    }
+
+    private fun clearPinIfUnused() {
+        val needed = regs.values.any {
+            it.currentMode == TransportMode.TLS_IPV6 && (it.registeredOk || it.attempting || it.account != null)
+        }
+        if (!needed) {
+            try { AddrOverride.set(null, null) } catch (_: UnsatisfiedLinkError) {}
+        }
+    }
+
+    private fun armTimeout(reg: RegLine, gen: Int, token: Int, mode: TransportMode) {
         val r = Runnable {
             pjsip.post {
-                if (gen == generation && token == attemptToken && !registeredOk) {
-                    failTransport(gen, token, "timeout 20s ${mode.label}")
+                if (gen == reg.generation && token == reg.attemptToken && !reg.registeredOk) {
+                    failTransport(reg, gen, token, "timeout 20s ${mode.label}")
                 }
             }
         }
-        timeout = r
+        reg.timeout = r
         main.postDelayed(r, 20_000)
     }
 
-    private fun cancelTimeout() {
-        timeout?.let { main.removeCallbacks(it) }
-        timeout = null
+    private fun cancelTimeout(reg: RegLine) {
+        reg.timeout?.let { main.removeCallbacks(it) }
+        reg.timeout = null
     }
 
-    private fun scheduleRetry(gen: Int) {
-        cancelRetry()
+    private fun scheduleRetry(reg: RegLine, gen: Int) {
+        cancelRetry(reg)
         val r = Runnable {
             pjsip.post {
-                if (gen == generation && wantRegister && !registeredOk) beginChain()
+                if (gen == reg.generation && reg.wantRegister && !reg.registeredOk) beginChain(reg)
             }
         }
-        retry = r
+        reg.retry = r
         main.postDelayed(r, 30_000)
     }
 
-    private fun cancelRetry() {
-        retry?.let { main.removeCallbacks(it) }
-        retry = null
+    private fun cancelRetry(reg: RegLine) {
+        reg.retry?.let { main.removeCallbacks(it) }
+        reg.retry = null
     }
 
     private fun logDns(host: String) {
@@ -753,8 +849,6 @@ class SipEngine(private val app: Application) {
             }
         }
         if (!sawEvent) {
-            // Not a codec-manager entry. pjmedia_endpt_create_audio_sdp adds
-            // telephone-event/8000 at payload type 120 when an 8 kHz codec is offered.
             SpikeLog.append(
                 "rfc2833 telephone-event/8000 pt=120 is added with PCMU/PCMA; " +
                     "it is not in the codec list (id would be telephone-event/8000/1)"
@@ -783,14 +877,20 @@ class SipEngine(private val app: Application) {
         else -> "no-preference"
     }
 
-    private fun destroyStack() {
-        closing = true
+    private fun callOn(lineId: String): Boolean {
+        val ui = _call.value
+        return callObj != null && ui != null && ui.lineId == lineId && ui.phase != CallPhase.ENDED
+    }
+
+    private fun tearDownActiveCall(reason: String) {
+        if (closingCall) return
         val recorded = callRecording.stop()
         stopRtp()
         val dropped = _call.value
         if (callObj != null && dropped != null && dropped.phase != CallPhase.ENDED) {
-            SpikeLog.append("hangup party=local-stack-teardown")
+            SpikeLog.append("hangup party=$reason")
         }
+        closingCall = true
         try { callObj?.hangup(CallOpParam()) } catch (e: Exception) {
             SpikeLog.append("stack teardown hangup failed: ${e.message}")
         }
@@ -802,7 +902,9 @@ class SipEngine(private val app: Application) {
                 outcome = if (dropped.answeredAt != null) Outcome.COMPLETED else Outcome.FAILED,
                 startedAt = dropped.startedAt,
                 durationSec = duration,
-                limit = ConfigStore.config.value?.historyLimit ?: 200,
+                limit = historyLimit(dropped.lineId),
+                lineId = dropped.lineId,
+                lineLabel = dropped.lineLabel,
             )
             offerRecording(recorded, historyId, dropped.number, dropped.startedAt)
             uiCleared = true
@@ -819,21 +921,8 @@ class SipEngine(private val app: Application) {
         liveCalls.remove(dying)
         try { dying?.delete() } catch (_: Exception) {}
         audioMedia = null
-        try { account?.shutdown() } catch (_: Exception) {}
-        try { account?.delete() } catch (_: Exception) {}
-        account = null
-        val endpoint = ep
-        ep = null
-        if (endpoint != null) {
-            try { endpoint.libDestroy() } catch (e: Exception) {
-                SpikeLog.append("libDestroy: ${e.message}")
-            }
-            try { endpoint.delete() } catch (_: Exception) {}
-        }
-        logWriter = null
-        try { AddrOverride.set(null, null) } catch (_: UnsatisfiedLinkError) {}
         abandonAudio()
-        closing = false
+        closingCall = false
     }
 
     private fun scheduleNet(reason: String) {
@@ -855,28 +944,42 @@ class SipEngine(private val app: Application) {
         val previous = seenNetKey
         seenNetKey = key
         SpikeLog.append("network $reason\n${snap.detail}")
-        if (!wantRegister) return@Runnable
+        val active = regs.values.filter { it.wantRegister }
+        if (active.isEmpty()) return@Runnable
         if (callInProgress()) {
-            pendingReregister = true
+            active.forEach { it.pendingReregister = true }
             SpikeLog.append("network $reason changed ($previous -> $key) deferred until the call ends")
             return@Runnable
         }
-        pjsip.post {
+        pjsip.post { reregisterAfterNetwork(reason, sig, key, previous) }
+    }
+
+    private fun reregisterAfterNetwork(reason: String, sig: String, key: String, previous: String) {
+        var ipChangeDone = false
+        for (reg in regs.values.toList()) {
+            if (!reg.wantRegister) continue
             when {
-                sig != planSig -> {
+                reg.planSig.isNotEmpty() && sig != reg.planSig -> {
                     SpikeLog.append("re-register after $reason signature $previous -> $key")
-                    beginChain()
+                    beginChain(reg)
                 }
-                registeredOk -> {
+                reg.registeredOk -> {
+                    if (!ipChangeDone) {
+                        try {
+                            ep?.handleIpChange(IpChangeParam())
+                        } catch (e: Exception) {
+                            SpikeLog.append("ip change failed: ${e.message}")
+                        }
+                        ipChangeDone = true
+                    }
                     try {
-                        ep?.handleIpChange(IpChangeParam())
-                        account?.setRegistration(true)
+                        reg.account?.setRegistration(true)
                         SpikeLog.append("re-register after $reason ($key)")
                     } catch (e: Exception) {
                         SpikeLog.append("re-register failed: ${e.message}\n${trace(e)}")
                     }
                 }
-                !attempting -> beginChain()
+                !reg.attempting -> beginChain(reg)
                 else -> SpikeLog.append("network $reason during attempt, not restarting")
             }
         }
@@ -890,28 +993,28 @@ class SipEngine(private val app: Application) {
     private fun netKey(snap: NetSnapshot): String =
         TransportPlan.networkKey(TransportPlan.signature(snap.summary, snap.hasIpv4), snap.addresses)
 
-    private fun onReg(code: Int, reason: String, expiration: Long, status: Int) {
-        if (closing) return
+    private fun onReg(lineId: String, accountGen: Int, code: Int, reason: String, expiration: Long, status: Int) {
+        val reg = regs[lineId] ?: return
+        if (reg.closing) return
         SpikeLog.append("REGISTER $code $reason exp=$expiration status=$status")
-        if (!wantRegister) return
-        val mode = currentMode ?: return
-        val gen = generation
-        val token = attemptToken
+        if (accountGen != reg.generation || !reg.wantRegister) return
+        val mode = reg.currentMode ?: return
         when {
-            code in 200..299 -> win(mode)
+            code in 200..299 -> win(reg, mode)
             code == 401 || code == 407 -> {
-                if (sawAuth) failTransport(gen, token, "REGISTER $code $reason")
+                if (reg.sawAuth) failTransport(reg, reg.generation, reg.attemptToken, "REGISTER $code $reason")
                 else {
-                    sawAuth = true
+                    reg.sawAuth = true
                     SpikeLog.append("auth challenge, waiting for authenticated REGISTER")
                 }
             }
-            code >= 300 -> failTransport(gen, token, "REGISTER $code $reason")
+            code >= 300 -> failTransport(reg, reg.generation, reg.attemptToken, "REGISTER $code $reason")
         }
     }
 
-    private fun onIncoming(acc: Account, callId: Int) {
-        if (!wantRegister) {
+    private fun onIncoming(acc: SpikeAccount, callId: Int) {
+        val reg = regs[acc.lineId]
+        if (reg == null || !reg.wantRegister) {
             SpikeLog.append("incoming ignored, phone is off")
             try {
                 val gone = SpikeCall(acc, callId, this, incoming = true)
@@ -941,8 +1044,6 @@ class SipEngine(private val app: Application) {
             val next = SpikeCall(acc, callId, this, incoming = true)
             retain(next)
             loggedResponses.clear()
-            // No-arg CallOpParam leaves audioCount at 0, and isEmpty() so pjsua
-            // keeps the default audio line. 180 must not init media; 200 does.
             val ringing = CallOpParam()
             ringing.statusCode = 180
             next.answer(ringing)
@@ -950,8 +1051,15 @@ class SipEngine(private val app: Application) {
             uiCleared = false
             callRecording.reset()
             val from = displayNumber(runCatching { next.info.remoteUri }.getOrDefault(""))
+            val label = ConfigStore.line(acc.lineId)?.config?.title.orEmpty()
             SpikeLog.append("INVITE incoming from $from")
-            val ui = CallUi(Direction.INCOMING, from, CallPhase.RINGING_IN)
+            val ui = CallUi(
+                direction = Direction.INCOMING,
+                number = from,
+                phase = CallPhase.RINGING_IN,
+                lineId = acc.lineId,
+                lineLabel = label,
+            )
             main.post { _call.value = ui }
         } catch (e: Exception) {
             SpikeLog.append("incoming failed: ${e.message}\n${trace(e)}")
@@ -964,7 +1072,7 @@ class SipEngine(private val app: Application) {
     }
 
     private fun onCallState(current: SpikeCall) {
-        if (closing) return
+        if (closingCall) return
         val info = try { current.info } catch (e: Exception) {
             SpikeLog.append("call state: ${e.message}")
             return
@@ -1005,8 +1113,9 @@ class SipEngine(private val app: Application) {
                 callRecording.startIfReady(audioMedia, captureMedia())
             }
             pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED -> {
+                val route = ui?.lineId?.let { ConfigStore.line(it)?.route() } ?: OutboundRoute.DIRECT
                 if (ui != null && DialTarget.shouldRetryViaClient(
-                        ConfigStore.outboundRoute(),
+                        route,
                         info.lastStatusCode,
                         sawEarly,
                         triedClient,
@@ -1023,7 +1132,7 @@ class SipEngine(private val app: Application) {
                     return
                 }
                 if (!current.incoming && !triedClient && !sawEarly && info.lastStatusCode >= 300 &&
-                    ConfigStore.outboundRoute() == OutboundRoute.DIRECT && !ClientProbe.answers
+                    route == OutboundRoute.DIRECT && !ClientProbe.answers
                 ) {
                     SpikeLog.append(
                         "direct rejected ${info.lastStatusCode} ${info.lastReason}; " +
@@ -1068,7 +1177,7 @@ class SipEngine(private val app: Application) {
     }
 
     private fun onCallTsx(prm: OnCallTsxStateParam) {
-        if (closing) return
+        if (closingCall) return
         try {
             val ev = prm.e ?: return
             val tsx = ev.body?.tsxState ?: return
@@ -1113,7 +1222,7 @@ class SipEngine(private val app: Application) {
     }
 
     private fun onCallMedia(current: SpikeCall) {
-        if (closing) return
+        if (closingCall) return
         val info = try { current.info } catch (_: Exception) { return }
         val endpoint = ep ?: return
         val media = info.media
@@ -1154,11 +1263,11 @@ class SipEngine(private val app: Application) {
 
     private fun logSdpDump(current: SpikeCall) {
         val dump = try { current.dump(true, "") } catch (_: Exception) { return }
-        val lines = dump.lineSequence().map { it.trim() }.filter { line ->
+        val rows = dump.lineSequence().map { it.trim() }.filter { line ->
             line.startsWith("m=") || line.startsWith("c=") ||
                 line.startsWith("a=rtpmap") || line.startsWith("a=send") || line.startsWith("a=inactive")
         }.take(30).joinToString("\n")
-        if (lines.isNotEmpty()) SpikeLog.append("sdp\n$lines")
+        if (rows.isNotEmpty()) SpikeLog.append("sdp\n$rows")
     }
 
     private fun onTransport(prm: OnTransportStateParam) {
@@ -1186,20 +1295,25 @@ class SipEngine(private val app: Application) {
         } else {
             SpikeLog.append("transport $state type=${prm.type} err=${prm.lastError}")
         }
-        if (!closing && attempting && !registeredOk &&
-            prm.state == pjsip_transport_state.PJSIP_TP_STATE_DISCONNECTED
-        ) {
-            val gen = generation
-            val token = attemptToken
-            val err = prm.lastError
-            pjsip.post { failTransport(gen, token, "transport disconnected err=$err") }
+        if (closingCall || prm.state != pjsip_transport_state.PJSIP_TP_STATE_DISCONNECTED) return
+        val mode = modeOfTransport(prm.type) ?: return
+        val err = prm.lastError
+        val victims = regs.values.filter { it.attempting && !it.registeredOk && !it.closing && it.currentMode == mode }
+        for (reg in victims) {
+            val gen = reg.generation
+            val token = reg.attemptToken
+            pjsip.post { failTransport(reg, gen, token, "transport disconnected err=$err") }
         }
     }
 
-    /**
-     * Sends the SIP hangup first when the user ended the call, then clears
-     * the local call. A remote disconnect skips a second hangup.
-     */
+    /** pjsua reports the transport name ("TLS", "TLS6", "UDP"), not the enum. */
+    private fun modeOfTransport(type: String?): TransportMode? = when (type?.trim()?.uppercase()) {
+        "TLS6" -> TransportMode.TLS_IPV6
+        "TLS" -> TransportMode.TLS_IPV4
+        "UDP" -> TransportMode.UDP
+        else -> null
+    }
+
     private fun finish(fromRemote: Boolean, outcome: Outcome, label: String, code: Int) {
         val recorded = callRecording.stop()
         val current = callObj
@@ -1243,7 +1357,9 @@ class SipEngine(private val app: Application) {
                 outcome = outcome,
                 startedAt = ui.startedAt,
                 durationSec = duration,
-                limit = ConfigStore.config.value?.historyLimit ?: 200,
+                limit = historyLimit(ui.lineId),
+                lineId = ui.lineId,
+                lineLabel = ui.lineLabel,
             )
         } else {
             -1L
@@ -1258,15 +1374,22 @@ class SipEngine(private val app: Application) {
             if (_call.value?.startedAt == ui.startedAt) _call.value = null
         }, 400)
         scheduleDelete(current)
-        if (pendingReregister) {
+        val deferred = regs.values.filter { it.pendingReregister && it.wantRegister }
+        if (deferred.isNotEmpty()) {
             pjsip.post {
-                if (!pendingReregister || callObj != null || !wantRegister) return@post
-                pendingReregister = false
-                SpikeLog.append("re-register deferred network change now that the call ended")
-                beginChain()
+                if (callObj != null) return@post
+                for (reg in deferred) {
+                    if (!reg.pendingReregister || !reg.wantRegister) continue
+                    reg.pendingReregister = false
+                    SpikeLog.append("re-register deferred network change now that the call ended")
+                    beginChain(reg)
+                }
             }
         }
     }
+
+    private fun historyLimit(lineId: String): Int =
+        ConfigStore.line(lineId)?.config?.historyLimit ?: ConfigStore.themeLine()?.config?.historyLimit ?: 200
 
     private fun offerRecording(file: File?, historyId: Long, number: String, startedAt: Long) {
         if (file == null) return
@@ -1323,7 +1446,13 @@ class SipEngine(private val app: Application) {
             val stat = current.getStreamStat(audioIndex.toLong()).rtcp
             val inn = stat.rxStat.pkt
             val out = stat.txStat.pkt
-            main.post { _line.value = _line.value.copy(rtpIn = inn, rtpOut = out) }
+            val lineId = _call.value?.lineId
+            if (lineId != null) {
+                main.post {
+                    val cur = _statuses.value[lineId] ?: return@post
+                    _statuses.value = _statuses.value + (lineId to cur.copy(rtpIn = inn, rtpOut = out))
+                }
+            }
             if (inn != lastRtpIn || out != lastRtpOut) {
                 SpikeLog.append("rtp in=$inn out=$out")
                 lastRtpIn = inn
@@ -1428,37 +1557,56 @@ class SipEngine(private val app: Application) {
     }
 
     private fun publishNet(snap: NetSnapshot) {
-        val sig = TransportPlan.signature(snap.summary, snap.hasIpv4)
-        main.post {
-            _line.value = _line.value.copy(network = snap.summary, signature = sig)
-        }
+        main.post { _network.value = snap.summary }
     }
 
-    private fun publishTransport() {
-        val mode = currentMode
-        val remembered = ConfigStore.winner(planSig)
-        val override = ConfigStore.transportOverride()
+    private fun publishTransport(id: String) {
+        val reg = regs[id]
+        val stored = ConfigStore.line(id)
+        val mode = reg?.currentMode
+        val remembered = reg?.planSig?.let { stored?.winner(it) }
+        val override = stored?.transportMode()
         val label = override?.uiLabel ?: mode?.uiLabel ?: "auto"
         main.post {
-            _line.value = _line.value.copy(
+            val cur = _statuses.value[id] ?: LineUi()
+            _statuses.value = _statuses.value + (id to cur.copy(
                 transport = label,
                 remembered = remembered?.uiLabel ?: "none",
-                signature = planSig.ifBlank { _line.value.signature },
-                username = username,
-                manual = ConfigStore.manualCreds() != null,
-            )
+                signature = reg?.planSig?.ifBlank { cur.signature } ?: cur.signature,
+                username = reg?.username?.ifBlank { cur.username } ?: cur.username,
+                manual = stored?.manualCreds() != null,
+                outbound = stored?.route()?.uiLabel ?: cur.outbound,
+                network = _network.value.ifBlank { cur.network },
+            ))
         }
     }
 
-    private fun setReg(reg: Registration, status: String) {
+    private fun setLineReg(id: String, registration: Registration, status: String) {
+        val reg = regs[id]
+        val stored = ConfigStore.line(id)
         main.post {
-            _registration.value = reg
-            _line.value = _line.value.copy(
-                registration = reg,
+            val cur = _statuses.value[id] ?: LineUi()
+            _statuses.value = _statuses.value + (id to cur.copy(
+                registration = registration,
                 status = status,
-                username = username,
-                manual = ConfigStore.manualCreds() != null,
-            )
+                username = reg?.username?.ifBlank { stored?.resolvedCreds()?.first.orEmpty() } ?: cur.username,
+                manual = stored?.manualCreds() != null,
+                nativeError = nativeError,
+                network = _network.value.ifBlank { cur.network },
+                outbound = stored?.route()?.uiLabel ?: cur.outbound,
+            ))
+            publishSummary()
+        }
+    }
+
+    private fun publishSummary() {
+        val enabled = ConfigStore.lines.value.filter { it.enabled }.map { it.id }.toSet()
+        val states = _statuses.value.filterKeys { it in enabled }.values.map { it.registration }
+        _registration.value = when {
+            states.any { it == Registration.ONLINE } -> Registration.ONLINE
+            states.any { it == Registration.CONNECTING } -> Registration.CONNECTING
+            states.any { it == Registration.FAILED } -> Registration.FAILED
+            else -> Registration.OFFLINE
         }
     }
 
@@ -1480,13 +1628,17 @@ class SipEngine(private val app: Application) {
         }
     }
 
-    private class SpikeAccount(private val engine: SipEngine) : Account() {
+    private class SpikeAccount(
+        private val engine: SipEngine,
+        val lineId: String,
+        private val accountGen: Int,
+    ) : Account() {
         override fun onRegState(prm: OnRegStateParam) {
             val code = prm.code
             val reason = prm.reason ?: ""
             val expiration = prm.expiration
             val status = prm.status
-            engine.pjsip.post { engine.onReg(code, reason, expiration, status) }
+            engine.pjsip.post { engine.onReg(lineId, accountGen, code, reason, expiration, status) }
         }
 
         override fun onIncomingCall(prm: OnIncomingCallParam) {

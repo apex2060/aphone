@@ -21,11 +21,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -44,6 +46,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.apex2060.softphone.config.ConfigStore
+import com.apex2060.softphone.config.LineChange
 import com.apex2060.softphone.config.Provisioner
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
@@ -61,9 +64,9 @@ private sealed interface ScanState {
     data class Error(val message: String) : ScanState
 }
 
-/** The only screen until a Comm Manager QR has been accepted. */
+/** First-time setup, or adding another phone when [onCancel] is set. */
 @Composable
-fun ScanScreen() {
+fun ScanScreen(onCancel: (() -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var hasCamera by remember {
@@ -86,8 +89,18 @@ fun ScanScreen() {
         scope.launch {
             state = try {
                 val (json, config) = Provisioner.fetch(ticket)
-                ConfigStore.save(ticket, json, config)
-                ScanState.Scanning
+                when (ConfigStore.upsert(ticket, json, config)) {
+                    LineChange.FULL -> ScanState.Error("You can add up to 8 phones")
+                    LineChange.UPDATED -> {
+                        Toast.makeText(context, "Phone updated", Toast.LENGTH_SHORT).show()
+                        onCancel?.invoke()
+                        ScanState.Scanning
+                    }
+                    LineChange.ADDED -> {
+                        onCancel?.invoke()
+                        ScanState.Scanning
+                    }
+                }
             } catch (e: Exception) {
                 ScanState.Error(e.message ?: "Setup failed")
             }
@@ -122,6 +135,7 @@ fun ScanScreen() {
                 }
             }
             if (!hasCamera) Button(onClick = { permission.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
+            if (onCancel != null) TextButton(onClick = onCancel) { Text("Cancel", color = Color.White) }
         }
         Surface(
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 12.dp),

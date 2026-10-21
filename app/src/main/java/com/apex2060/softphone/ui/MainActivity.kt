@@ -16,8 +16,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
+import com.apex2060.softphone.config.ProvisionConfig
 import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneService
 import com.apex2060.softphone.record.Recordings
@@ -27,28 +31,29 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Recordings.restoreDialog(this)
         openRecordingPrompt(intent)
-        val engine = (application as SoftphoneApp).engine
         setContent {
-            val config by ConfigStore.config.collectAsState()
-            val cfg = config
-            if (cfg == null) {
+            val stored by ConfigStore.lines.collectAsState()
+            var adding by remember { mutableStateOf(false) }
+            val theme = (stored.firstOrNull { it.enabled } ?: stored.firstOrNull())?.config?.theme
+                ?: ProvisionConfig.DEFAULT_THEME
+            if (stored.isEmpty()) {
                 SoftphoneTheme { ScanScreen() }
+            } else if (adding) {
+                SoftphoneTheme(theme) { ScanScreen(onCancel = { adding = false }) }
             } else {
                 val permissions = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { askBatteryExemption() }
-                LaunchedEffect(cfg.sipUsername) {
-                    if (ConfigStore.phoneEnabled.value) PhoneService.start(this@MainActivity)
+                LaunchedEffect(stored.joinToString { it.id }) {
+                    if (ConfigStore.anyEnabled()) PhoneService.start(this@MainActivity)
                     val wanted = buildList {
                         add(Manifest.permission.RECORD_AUDIO)
                         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
                     }
                     permissions.launch(wanted.toTypedArray())
                 }
-                SoftphoneTheme(cfg.theme) {
-                    HomeScreen(cfg, onOpenCall = ::openCall, onDial = { number ->
-                        if (engine.dial(number)) openCall()
-                    })
+                SoftphoneTheme(theme) {
+                    HomeScreen(onOpenCall = ::openCall, onAdd = { adding = true })
                     RecordingPromptHost()
                 }
             }
@@ -73,7 +78,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (ConfigStore.config.value == null || !ConfigStore.phoneEnabled.value) return
+        if (!ConfigStore.anyEnabled()) return
         (application as SoftphoneApp).engine.refreshRegistration("resume")
         if (ConfigStore.askedBattery) askFullScreenIntent()
     }

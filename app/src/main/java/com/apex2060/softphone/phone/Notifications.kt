@@ -57,7 +57,7 @@ object Notifications {
         )
     }
 
-    private fun title() = ConfigStore.config.value?.title ?: "22 Phone"
+    private fun title() = ConfigStore.themeLine()?.config?.title ?: "22 Phone"
 
     private fun openApp(context: Context) = PendingIntent.getActivity(
         context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
@@ -110,12 +110,13 @@ object Notifications {
         return b.build()
     }
 
-    fun incoming(context: Context, number: String): Notification {
+    fun incoming(context: Context, number: String, lineLabel: String): Notification {
         val person = Person.Builder().setName(number).setImportant(true).build()
+        val line = lineLabel.ifBlank { title() }
         return NotificationCompat.Builder(context, CH_INCOMING)
             .setSmallIcon(R.drawable.ic_call)
             .setContentTitle(number)
-            .setContentText("Incoming call · ${title()}")
+            .setContentText("Incoming call · $line")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
@@ -172,11 +173,11 @@ object Notifications {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
-    fun missed(context: Context, number: String): Notification =
+    fun missed(context: Context, number: String, lineLabel: String): Notification =
         NotificationCompat.Builder(context, CH_MISSED)
             .setSmallIcon(R.drawable.ic_call)
             .setContentTitle("Missed call")
-            .setContentText(number)
+            .setContentText(if (lineLabel.isBlank()) number else "$number · $lineLabel")
             .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))

@@ -105,6 +105,10 @@ jobs:
             version_name="1.1.2"
             version_code="17"
             official="true"
+          elif [ "$tag" = "spike-pjsip-v0.9-official" ]; then
+            version_name="1.2.0"
+            version_code="18"
+            official="true"
           else
             version_name="${tag#spike-pjsip-v}"
             if [ "$version_name" = "$tag" ]; then

@@ -20,16 +20,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +43,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -54,14 +60,23 @@ import com.apex2060.softphone.record.TapSeries
 import java.io.File
 
 @Composable
-fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
+fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
     val context = LocalContext.current
-    val line by engine.line.collectAsState()
-    val selected = ConfigStore.transportOverride()
-    var outbound by remember { mutableStateOf(ConfigStore.outboundRoute()) }
+    val stored by ConfigStore.lines.collectAsState()
+    val line = stored.firstOrNull { it.id == lineId }
+    if (line == null) {
+        LaunchedEffect(lineId) { onBack() }
+        return
+    }
+    val statuses by engine.statuses.collectAsState()
+    val status = statuses[lineId]
+    val network by engine.network.collectAsState()
+    val selected = line.transportMode()
+    var outbound by remember(line.outboundRoute) { mutableStateOf(line.route()) }
     val probe by ClientProbe.text.collectAsState()
     val autoRecording by ConfigStore.autoRecording.collectAsState()
     val taps = remember { TapSeries() }
+    var confirmRemove by remember { mutableStateOf(false) }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp),
@@ -88,18 +103,18 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
                         .padding(vertical = 4.dp),
                 )
             }
-            val phoneOn by ConfigStore.phoneEnabled.collectAsState()
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(line.config.title, style = MaterialTheme.typography.titleMedium)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (phoneOn) "Phone is on" else "Phone is off",
+                        if (line.enabled) "Phone is on" else "Phone is off",
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Switch(
-                        checked = phoneOn,
+                        checked = line.enabled,
                         onCheckedChange = { on ->
-                            if (on) PhoneService.turnOn(context) else PhoneService.turnOff(context)
+                            if (on) PhoneService.turnOn(context, lineId) else PhoneService.turnOff(context, lineId)
                         },
                     )
                 }
@@ -110,12 +125,19 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                StatusLine("Registration", if (phoneOn) UiText.scrub(line.status) else "Phone is off")
-                StatusLine("Username", UiText.scrub(line.username.ifBlank { "—" } + if (line.manual) " (manual)" else ""))
-                StatusLine("Network", UiText.networkIndicator(line.network).ifBlank { "—" })
-                StatusLine("Transport", UiText.scrub(line.transport))
-                StatusLine("Remembered for this network", UiText.scrub(line.remembered))
-                StatusLine("RTP", "in=${line.rtpIn} out=${line.rtpOut}")
+                val regText = if (!line.enabled) "Off" else UiText.scrub(status?.status ?: "Offline")
+                StatusLine("Registration", regText)
+                StatusLine(
+                    "Username",
+                    UiText.scrub(
+                        (status?.username?.ifBlank { line.config.sipUsername } ?: line.config.sipUsername) +
+                            if (line.manualCreds() != null) " (manual)" else "",
+                    ),
+                )
+                StatusLine("Network", UiText.networkIndicator(network).ifBlank { "—" })
+                StatusLine("Transport", UiText.scrub(status?.transport ?: "auto"))
+                StatusLine("Remembered for this network", UiText.scrub(status?.remembered ?: "none"))
+                StatusLine("RTP", "in=${status?.rtpIn ?: 0} out=${status?.rtpOut ?: 0}")
                 StatusLine("Notifications", if (Notifications.notificationsAllowed(context)) "allowed" else "denied")
                 StatusLine("Full-screen alerts", if (Notifications.canUseFullScreenIntent(context)) "allowed" else "denied")
                 StatusLine("Battery", if (Notifications.batteryUnrestricted(context)) "unrestricted" else "optimized")
@@ -123,14 +145,14 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
                 OutboundRoute.entries.forEach { route ->
                     OverrideRow(route.uiLabel, outbound == route) {
                         outbound = route
-                        engine.setOutboundRoute(route)
+                        engine.setOutboundRoute(lineId, route)
                     }
                 }
                 StatusLine("Alternate route probe", UiText.scrub(probe))
                 Text("Transport override", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
-                OverrideRow("Auto", selected == null) { engine.setTransportOverride(null) }
+                OverrideRow("Auto", selected == null) { engine.setTransportOverride(lineId, null) }
                 TransportMode.entries.forEach { mode ->
-                    OverrideRow(mode.uiLabel, selected == mode) { engine.setTransportOverride(mode) }
+                    OverrideRow(mode.uiLabel, selected == mode) { engine.setTransportOverride(lineId, mode) }
                 }
                 if (!Notifications.notificationsAllowed(context)) {
                     TextButton(onClick = {
@@ -163,6 +185,9 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
                         }
                     }) { Text("Allow full-screen alerts") }
                 }
+                TextButton(onClick = { confirmRemove = true }) {
+                    Text("Remove this phone", color = LocalCallColors.current.decline)
+                }
             }
             HorizontalDivider()
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -177,6 +202,49 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
             }
         }
     }
+    if (confirmRemove) {
+        RemoveDialog(
+            pinRequired = line.config.adminPin,
+            onDismiss = { confirmRemove = false },
+            onConfirm = {
+                confirmRemove = false
+                PhoneService.removeLine(context, lineId)
+                onBack()
+            },
+        )
+    }
+}
+
+@Composable
+private fun RemoveDialog(pinRequired: String?, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    var pin by remember { mutableStateOf("") }
+    var wrong by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Remove this phone?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("This unregisters it on this device. Other phones stay as they are.")
+                if (pinRequired != null) {
+                    OutlinedTextField(
+                        value = pin,
+                        onValueChange = { pin = it; wrong = false },
+                        label = { Text("Admin PIN") },
+                        isError = wrong,
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (pinRequired == null || pin == pinRequired) onConfirm() else wrong = true
+            }) { Text("Remove", color = LocalCallColors.current.decline) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

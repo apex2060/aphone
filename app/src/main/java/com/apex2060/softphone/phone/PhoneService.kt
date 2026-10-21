@@ -34,6 +34,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /** Keeps registration up, rings, and refreshes the provisioning document. */
@@ -55,7 +57,7 @@ class PhoneService : Service() {
     override fun onCreate() {
         super.onCreate()
         goForeground(Notifications.status(this, engine.registration.value, null), mic = false)
-        if (!ConfigStore.phoneEnabled.value) {
+        if (!ConfigStore.anyEnabled()) {
             stopSelf()
             return
         }
@@ -66,15 +68,18 @@ class PhoneService : Service() {
                 acquire(6 * 60 * 60 * 1000L)
             }
         scope.launch {
-            ConfigStore.config.collect { cfg ->
-                val creds = ConfigStore.resolvedCreds()
-                if (cfg == null || creds == null) {
-                    engine.logout()
-                    stopSelf()
-                } else {
-                    engine.login(creds.first, creds.second)
+            ConfigStore.lines
+                .map { lines ->
+                    lines.filter { it.enabled }.map { line ->
+                        val creds = line.resolvedCreds()
+                        Triple(line.id, creds?.first.orEmpty(), creds?.second.orEmpty())
+                    }
                 }
-            }
+                .distinctUntilChanged()
+                .collect { wanted ->
+                    engine.syncEnabledLines()
+                    if (wanted.isEmpty()) stopSelf()
+                }
         }
         scope.launch {
             combine(engine.registration, engine.call) { r, c -> r to c }.collect { (reg, call) ->
@@ -118,14 +123,14 @@ class PhoneService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         val incoming = call?.takeIf { it.phase == CallPhase.RINGING_IN }
         if (incoming != null) {
-            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, incoming.number))
+            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, incoming.number, incoming.lineLabel))
             startRing(incoming.number)
         } else {
             stopRing()
             nm.cancel(Notifications.ID_INCOMING)
         }
         if (call?.phase == CallPhase.ENDED && lastPhase != CallPhase.ENDED && call.outcome == Outcome.MISSED) {
-            nm.notify(Notifications.ID_MISSED, Notifications.missed(this, call.number))
+            nm.notify(Notifications.ID_MISSED, Notifications.missed(this, call.number, call.lineLabel))
         }
         lastPhase = call?.phase
         val inCall = call != null && call.phase in setOf(CallPhase.DIALING, CallPhase.RINGING_OUT, CallPhase.ACTIVE)
@@ -232,18 +237,21 @@ class PhoneService : Service() {
     }
 
     private suspend fun refreshIfDue() {
-        val cfg = ConfigStore.config.value ?: return
-        val ticket = ConfigStore.ticket ?: return
-        if (cfg.refreshHours == 0) return
-        if (System.currentTimeMillis() - ConfigStore.refreshedAt < cfg.refreshHours * 3_600_000L) return
-        try {
-            val (json, next) = Provisioner.fetch(ticket)
-            ConfigStore.save(ticket, json, next)
-            SpikeLog.append("provision refresh saved title=${next.title} refreshHours=${next.refreshHours}")
-        } catch (e: RevokedException) {
-            deprovision(this)
-        } catch (e: Exception) {
-            SpikeLog.append("provision refresh failed: ${e.message}")
+        val now = System.currentTimeMillis()
+        for (line in ConfigStore.lines.value) {
+            val ticket = line.ticket ?: continue
+            if (line.config.refreshHours == 0) continue
+            if (now - line.refreshedAt < line.config.refreshHours * 3_600_000L) continue
+            try {
+                val (json, next) = Provisioner.fetch(ticket)
+                ConfigStore.updateDocument(line.id, ticket, json, next)
+                SpikeLog.append("provision refresh saved title=${next.title} refreshHours=${next.refreshHours}")
+            } catch (e: RevokedException) {
+                SpikeLog.append("provision revoked user=${line.config.sipUsername}")
+                removeLine(this, line.id)
+            } catch (e: Exception) {
+                SpikeLog.append("provision refresh failed: ${e.message}")
+            }
         }
     }
 
@@ -253,28 +261,49 @@ class PhoneService : Service() {
         const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
 
         fun start(context: Context) {
-            if (!ConfigStore.phoneEnabled.value) return
+            if (!ConfigStore.anyEnabled()) return
             ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
         }
 
-        fun turnOn(context: Context) {
-            ConfigStore.setPhoneEnabled(true)
+        fun turnOn(context: Context, lineId: String) {
+            ConfigStore.setEnabled(lineId, true)
             ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
         }
 
-        fun turnOff(context: Context) {
-            ConfigStore.setPhoneEnabled(false)
-            (context.applicationContext as SoftphoneApp).engine.turnOff()
-            context.stopService(Intent(context, PhoneService::class.java))
+        fun turnOff(context: Context, lineId: String) {
+            ConfigStore.setEnabled(lineId, false)
+            (context.applicationContext as SoftphoneApp).engine.turnOff(lineId)
+            if (!ConfigStore.anyEnabled()) {
+                context.stopService(Intent(context, PhoneService::class.java))
+            }
         }
 
-        fun deprovision(context: Context) {
+        /** Unregisters this phone and deletes it on this device. Other phones stay. */
+        fun removeLine(context: Context, lineId: String) {
+            (context.applicationContext as SoftphoneApp).engine.turnOff(lineId)
+            ConfigStore.remove(lineId)
+            if (!ConfigStore.anyEnabled()) {
+                context.stopService(Intent(context, PhoneService::class.java))
+            }
+            if (ConfigStore.lines.value.isEmpty()) {
+                context.getSystemService(NotificationManager::class.java).cancel(Notifications.ID_SERVICE)
+            }
+        }
+
+        /** Removes this phone and its call history. Other phones stay. */
+        fun resetLine(context: Context, lineId: String) {
+            val doomed = CallHistory.records.value.filter { it.lineId == lineId }.map { it.id }.toSet()
+            Recordings.discardIfHistory(context, doomed)
             val app = context.applicationContext as SoftphoneApp
-            app.engine.logout()
-            Recordings.discard(context)
-            CallHistory.clear()
-            ConfigStore.clear()
-            context.getSystemService(NotificationManager::class.java).cancelAll()
+            app.engine.turnOff(lineId)
+            CallHistory.clearLine(lineId)
+            ConfigStore.remove(lineId)
+            if (!ConfigStore.anyEnabled()) {
+                context.stopService(Intent(context, PhoneService::class.java))
+            }
+            if (ConfigStore.lines.value.isEmpty()) {
+                context.getSystemService(NotificationManager::class.java).cancelAll()
+            }
         }
     }
 }

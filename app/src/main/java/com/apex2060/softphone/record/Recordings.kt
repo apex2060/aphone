@@ -75,7 +75,7 @@ object Recordings {
         foreground: Boolean,
     ) {
         val app = context.applicationContext
-        if (ConfigStore.config.value == null && ConfigStore.manualCreds() == null) {
+        if (ConfigStore.lines.value.isEmpty()) {
             file.delete()
             SpikeLog.append("recording dropped, phone has no line")
             return
@@ -147,6 +147,12 @@ object Recordings {
         _prompt.value = null
         cancelNotification(context)
         SpikeLog.append("recording saved ${dest.name}")
+    }
+
+    fun discardIfHistory(context: Context, historyIds: Set<Long>) {
+        if (historyIds.isEmpty()) return
+        val pending = read(context) ?: return
+        if (pending.historyId in historyIds) discard(context)
     }
 
     fun discard(context: Context, token: String? = null) {

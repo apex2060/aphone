@@ -69,11 +69,15 @@ class CallActivity : ComponentActivity() {
         }
         setContent {
             val call by engine.call.collectAsState()
-            val config by ConfigStore.config.collectAsState()
+            val stored by ConfigStore.lines.collectAsState()
             val current = call
-            SoftphoneTheme(config?.theme ?: ProvisionConfig.DEFAULT_THEME) {
+            val themeLine = current?.lineId?.let { id -> stored.firstOrNull { it.id == id } }
+                ?: stored.firstOrNull { it.enabled }
+                ?: stored.firstOrNull()
+            SoftphoneTheme(themeLine?.config?.theme ?: ProvisionConfig.DEFAULT_THEME) {
                 if (current != null && current.phase != CallPhase.ENDED) {
-                    val names = config?.speedDials.orEmpty().associate { engine.normalize(it.number) to it.label }
+                    val names = themeLine?.config?.speedDials.orEmpty()
+                        .associate { engine.normalize(it.number, themeLine?.id) to it.label }
                     CallScreen(engine, current, names[current.number])
                 }
             }
@@ -162,6 +166,9 @@ private fun CallScreen(engine: com.apex2060.softphone.SipEngine, call: CallUi, n
             Spacer(Modifier.height(48.dp))
             Text(name ?: call.number, fontSize = 32.sp, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onBackground)
             if (name != null) Text(call.number, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (call.lineLabel.isNotBlank()) {
+                Text(call.lineLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Spacer(Modifier.height(8.dp))
             Text(status, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (dtmf.isNotEmpty()) Text(dtmf, fontSize = 24.sp, color = MaterialTheme.colorScheme.onBackground)
