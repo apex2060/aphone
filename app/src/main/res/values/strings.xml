@@ -1,3 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Softphone</string>
+    <string name="app_name">22 Phone</string>
+    <string name="notif_channel_status">22 Phone</string>
+    <string name="notif_channel_incoming">Incoming calls</string>
+    <string name="notif_channel_missed">Missed calls</string>
 </resources>

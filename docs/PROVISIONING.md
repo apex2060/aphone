@@ -76,7 +76,7 @@ Respond `200` with `application/json`. Only `sip.username` and `sip.password` ar
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `version` | int | `1` | Schema version, reserved for future changes. |
-| `title` | string | `"Softphone"` | Shown in the header bar and notifications. |
+| `title` | string | `"22 Phone"` | Shown in the header bar and notifications. |
 | `subtitle` | string | none | Small line under the title, e.g. the line name or extension. |
 | `sip.username` | string | **required** | Plivo **Endpoint** username (Voice > Endpoints in the Plivo console). |
 | `sip.password` | string | **required** | Plivo Endpoint password. |

@@ -1,3 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="launcher_bg">#0B5FFF</color>
+    <!-- White field behind the heart mark. The artwork is drawn for a light ground. -->
+    <color name="launcher_bg">#FFFFFF</color>
 </resources>

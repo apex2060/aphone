@@ -94,7 +94,7 @@ data class ProvisionConfig(
             }
 
             return ProvisionConfig(
-                title = root.optString("title").ifBlank { "Softphone" },
+                title = root.optString("title").ifBlank { "22 Phone" },
                 subtitle = root.optString("subtitle").ifBlank { null },
                 sipUsername = user,
                 sipPassword = pass,
