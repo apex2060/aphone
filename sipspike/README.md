@@ -26,8 +26,10 @@ that leaves those the same does not. Codecs offered are PCMU then PCMA
 (`PCMU/8000/1`, `PCMA/8000/1`). AMR and the other MediaCodec entries are
 priority 0. `telephone-event/8000` payload type 120 is added by pjmedia with
 the 8 kHz codecs; it is not a separate codec-list entry. SRTP is off. G.711
-VAD is off so silence still sends RTP behind CGNAT. Hangup sends BYE or
-CANCEL before the local call is cleared.
+VAD is off so silence still sends RTP behind CGNAT. A network change
+during a call waits until the call ends before it re-registers. Hangup
+sends BYE or CANCEL before the local call is cleared. The log says
+`hangup party=local-user`, `local-stack-teardown`, or `pjsua-or-remote`.
 
 The log is timestamped, stored in a rotating file capped around 2 MB, and
 shown in Details with Share and Copy. It records provisioning (password,

@@ -201,7 +201,10 @@ class SpikeService : Service() {
         try {
             ServiceCompat.startForeground(this, SpikeNotifications.ID_SERVICE, notification, withMic)
         } catch (e: Exception) {
-            SpikeLog.append("foreground with mic refused: ${e.message}")
+            SpikeLog.append(
+                "foreground with mic refused: ${e.javaClass.simpleName}: ${e.message} " +
+                    "(call is not hung up)"
+            )
             ServiceCompat.startForeground(this, SpikeNotifications.ID_SERVICE, notification, base)
         }
     }

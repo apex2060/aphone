@@ -1,6 +1,8 @@
 package com.twentytwo.phone.sipspike
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
@@ -10,7 +12,9 @@ import android.net.Network
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import androidx.compose.runtime.mutableStateListOf
+import androidx.core.content.ContextCompat
 import com.twentytwo.phone.sipspike.config.ConfigStore
 import com.twentytwo.phone.sipspike.history.CallHistory
 import com.twentytwo.phone.sipspike.history.Direction
@@ -116,6 +120,9 @@ class SipEngine(private val app: Application) {
     private var account: SpikeAccount? = null
     private var logWriter: RedactingLog? = null
     @Volatile private var callObj: SpikeCall? = null
+    /** Strong refs so the GC cannot finalize a Call and hang it up. */
+    private val liveCalls = ArrayList<SpikeCall>()
+    @Volatile private var pendingReregister = false
     private var audioMedia: AudioMedia? = null
     private var audioIndex = -1
     private var signaled = false
@@ -260,21 +267,31 @@ class SipEngine(private val app: Application) {
 
     fun answer() {
         if (_call.value?.phase != CallPhase.RINGING_IN) return
-        SpikeLog.append("answer")
+        SpikeLog.append("answer tapped")
         pjsip.post {
-            val current = callObj ?: return@post
+            val current = callObj
+            if (current == null) {
+                SpikeLog.append("answer failed: call object was dropped")
+                return@post
+            }
+            prepareAudio("answer")
             try {
-                val prm = CallOpParam()
+                // true fills audioCount=1. The no-arg constructor leaves it 0 and
+                // pjsua then omits the audio answer.
+                val prm = CallOpParam(true)
                 prm.statusCode = 200
+                prm.opt.audioCount = 1
+                SpikeLog.append("answer 200 audioCount=${prm.opt.audioCount}")
                 current.answer(prm)
             } catch (e: Exception) {
-                SpikeLog.append("answer failed: ${e.message}")
+                SpikeLog.append("answer failed: ${e.message}\n${trace(e)}")
             }
         }
     }
 
     fun decline() {
         if (_call.value?.phase != CallPhase.RINGING_IN) return
+        SpikeLog.append("hangup party=local-user decline")
         pjsip.post { finish(fromRemote = false, outcome = Outcome.DECLINED, label = "Declined", code = 486) }
     }
 
@@ -286,6 +303,7 @@ class SipEngine(private val app: Application) {
             return
         }
         val outcome = if (state.answeredAt != null) Outcome.COMPLETED else Outcome.FAILED
+        SpikeLog.append("hangup party=local-user phase=${state.phase}")
         pjsip.post { finish(fromRemote = false, outcome = outcome, label = "Call ended", code = 0) }
     }
 
@@ -336,16 +354,24 @@ class SipEngine(private val app: Application) {
         }
         val uri = if (ui.number.startsWith("sip:", ignoreCase = true)) ui.number
         else "sip:${ui.number}@phone.plivo.com"
+        var next: SpikeCall? = null
         try {
             signaled = false
             uiCleared = false
-            val next = SpikeCall(acc, this, incoming = false)
-            next.makeCall(uri, CallOpParam(true))
-            callObj = next
-            SpikeLog.append("INVITE $uri")
-            engageAudio(speaker = false)
+            prepareAudio("dial")
+            next = SpikeCall(acc, this, incoming = false)
+            retain(next)
+            val prm = CallOpParam(true)
+            prm.opt.audioCount = 1
+            next.makeCall(uri, prm)
+            SpikeLog.append("INVITE $uri audioCount=${prm.opt.audioCount}")
         } catch (e: Exception) {
-            SpikeLog.append("INVITE failed: ${e.message}")
+            SpikeLog.append("INVITE failed: ${e.message}\n${trace(e)}")
+            next?.let { failed ->
+                if (callObj === failed) callObj = null
+                liveCalls.remove(failed)
+                try { failed.delete() } catch (_: Exception) {}
+            }
             main.post {
                 _call.value = ui.copy(phase = CallPhase.ENDED, endedLabel = "Call failed", outcome = Outcome.FAILED)
             }
@@ -447,6 +473,7 @@ class SipEngine(private val app: Application) {
         cfg.uaConfig.natTypeInSdp = 1
         cfg.medConfig.clockRate = 16000
         cfg.medConfig.sndClockRate = 16000
+        cfg.medConfig.noVad = true
         endpoint.libInit(cfg)
 
         val tp = TransportConfig()
@@ -671,9 +698,11 @@ class SipEngine(private val app: Application) {
         stopRtp()
         val dropped = _call.value
         if (callObj != null && dropped != null && dropped.phase != CallPhase.ENDED) {
-            SpikeLog.append("signal BYE/CANCEL before stack teardown")
+            SpikeLog.append("hangup party=local-stack-teardown")
         }
-        try { callObj?.hangup(CallOpParam()) } catch (_: Exception) {}
+        try { callObj?.hangup(CallOpParam()) } catch (e: Exception) {
+            SpikeLog.append("stack teardown hangup failed: ${e.message}")
+        }
         if (dropped != null && dropped.phase != CallPhase.ENDED) {
             val duration = dropped.answeredAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
             CallHistory.add(
@@ -687,8 +716,10 @@ class SipEngine(private val app: Application) {
             uiCleared = true
             main.post { if (_call.value?.startedAt == dropped.startedAt) _call.value = null }
         }
-        try { callObj?.delete() } catch (_: Exception) {}
+        val dying = callObj
         callObj = null
+        liveCalls.remove(dying)
+        try { dying?.delete() } catch (_: Exception) {}
         audioMedia = null
         try { account?.shutdown() } catch (_: Exception) {}
         try { account?.delete() } catch (_: Exception) {}
@@ -727,6 +758,11 @@ class SipEngine(private val app: Application) {
         seenNetKey = key
         SpikeLog.append("network $reason\n${snap.detail}")
         if (!wantRegister) return@Runnable
+        if (callInProgress()) {
+            pendingReregister = true
+            SpikeLog.append("network $reason changed ($previous -> $key) deferred until the call ends")
+            return@Runnable
+        }
         pjsip.post {
             when {
                 sig != planSig -> {
@@ -739,13 +775,18 @@ class SipEngine(private val app: Application) {
                         account?.setRegistration(true)
                         SpikeLog.append("re-register after $reason ($key)")
                     } catch (e: Exception) {
-                        SpikeLog.append("re-register failed: ${e.message}")
+                        SpikeLog.append("re-register failed: ${e.message}\n${trace(e)}")
                     }
                 }
                 !attempting -> beginChain()
                 else -> SpikeLog.append("network $reason during attempt, not restarting")
             }
         }
+    }
+
+    private fun callInProgress(): Boolean {
+        val phase = _call.value?.phase
+        return callObj != null && phase != null && phase != CallPhase.ENDED
     }
 
     private fun netKey(snap: NetSnapshot): String =
@@ -786,10 +827,12 @@ class SipEngine(private val app: Application) {
         }
         try {
             val next = SpikeCall(acc, callId, this, incoming = true)
+            retain(next)
+            // No-arg CallOpParam leaves audioCount at 0, and isEmpty() so pjsua
+            // keeps the default audio line. 180 must not init media; 200 does.
             val ringing = CallOpParam()
             ringing.statusCode = 180
             next.answer(ringing)
-            callObj = next
             signaled = false
             uiCleared = false
             val from = displayNumber(runCatching { next.info.remoteUri }.getOrDefault(""))
@@ -797,8 +840,13 @@ class SipEngine(private val app: Application) {
             val ui = CallUi(Direction.INCOMING, from, CallPhase.RINGING_IN)
             main.post { _call.value = ui }
         } catch (e: Exception) {
-            SpikeLog.append("incoming failed: ${e.message}")
+            SpikeLog.append("incoming failed: ${e.message}\n${trace(e)}")
         }
+    }
+
+    private fun retain(call: SpikeCall) {
+        liveCalls.add(call)
+        callObj = call
     }
 
     private fun onCallState(current: SpikeCall) {
@@ -808,7 +856,8 @@ class SipEngine(private val app: Application) {
             return
         }
         SpikeLog.append(
-            "call ${info.stateText} code=${info.lastStatusCode} ${info.lastReason} ${info.remoteUri}"
+            "call ${info.stateText} code=${info.lastStatusCode} ${info.lastReason} " +
+                "localHangup=$signaled ${info.remoteUri}"
         )
         if (info.state != pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED &&
             info.state != pjsip_inv_state.PJSIP_INV_STATE_NULL
@@ -844,7 +893,11 @@ class SipEngine(private val app: Application) {
                     Outcome.COMPLETED -> "Call ended"
                     Outcome.FAILED -> "Call ended ${info.lastStatusCode}"
                 }
-                SpikeLog.append("remote end ${info.lastStatusCode} ${info.lastReason} before teardown")
+                val who = if (signaled) "local-app" else "pjsua-or-remote"
+                SpikeLog.append(
+                    "hangup party=$who code=${info.lastStatusCode} ${info.lastReason} " +
+                        "state=${info.stateText}"
+                )
                 finish(fromRemote = true, outcome = outcome, label = label, code = info.lastStatusCode)
             }
             pjsip_inv_state.PJSIP_INV_STATE_CALLING ->
@@ -873,16 +926,20 @@ class SipEngine(private val app: Application) {
         for (i in 0 until media.size) {
             val item = media.get(i)
             if (item.type != pjmedia_type.PJMEDIA_TYPE_AUDIO) continue
+            val statusName = mediaStatusName(item.status)
             val active = item.status == pjsua_call_media_status.PJSUA_CALL_MEDIA_ACTIVE ||
                 item.status == pjsua_call_media_status.PJSUA_CALL_MEDIA_REMOTE_HOLD
+            if (item.status == pjsua_call_media_status.PJSUA_CALL_MEDIA_ERROR) {
+                SpikeLog.append("media idx=$i status=error (pjsua, not a local hangup)")
+            }
             try {
                 val stream = current.getStreamInfo(i.toLong())
                 SpikeLog.append(
                     "sdp audio idx=$i codec=${stream.codecName}/${stream.codecClockRate} " +
-                        "dir=${stream.dir} remote=${stream.remoteRtpAddress} status=${item.status}"
+                        "dir=${stream.dir} remote=${stream.remoteRtpAddress} status=$statusName"
                 )
             } catch (e: Exception) {
-                SpikeLog.append("sdp audio idx=$i status=${item.status} (${e.message})")
+                SpikeLog.append("sdp audio idx=$i status=$statusName (${e.message})")
             }
             if (!active) continue
             try {
@@ -895,7 +952,7 @@ class SipEngine(private val app: Application) {
                 SpikeLog.append("audio connected")
                 logSdpDump(current)
             } catch (e: Exception) {
-                SpikeLog.append("audio connect failed: ${e.message}")
+                SpikeLog.append("audio connect failed: ${e.message}\n${trace(e)}")
             }
         }
     }
@@ -963,7 +1020,7 @@ class SipEngine(private val app: Application) {
                     current.hangup(CallOpParam())
                 }
             } catch (e: Exception) {
-                SpikeLog.append("hangup signal failed: ${e.message}")
+                SpikeLog.append("hangup signal failed: ${e.message}\n${trace(e)}")
             }
         }
         val ui = _call.value
@@ -993,13 +1050,26 @@ class SipEngine(private val app: Application) {
             if (_call.value?.startedAt == ui.startedAt) _call.value = null
         }, 400)
         scheduleDelete(current)
+        if (pendingReregister) {
+            pjsip.post {
+                if (!pendingReregister || callObj != null || !wantRegister) return@post
+                pendingReregister = false
+                SpikeLog.append("re-register deferred network change now that the call ended")
+                beginChain()
+            }
+        }
     }
 
     private fun scheduleDelete(current: SpikeCall?) {
         if (current == null) return
         pjsip.post {
+            try {
+                current.delete()
+            } catch (e: Exception) {
+                SpikeLog.append("call delete failed: ${e.message}")
+            }
             if (callObj === current) callObj = null
-            try { current.delete() } catch (_: Exception) {}
+            liveCalls.remove(current)
         }
     }
 
@@ -1059,6 +1129,33 @@ class SipEngine(private val app: Application) {
             audio.isSpeakerphoneOn = on
         }
     }
+
+    private fun prepareAudio(why: String) {
+        val mic = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        audio.mode = AudioManager.MODE_IN_COMMUNICATION
+        val dev = try {
+            val mgr = ep?.audDevManager()
+            "capture=${mgr?.captureDev} playback=${mgr?.playbackDev}"
+        } catch (e: Exception) {
+            "dev unavailable (${e.message})"
+        }
+        SpikeLog.append("audio prepare $why micGranted=$mic mode=${audio.mode} $dev")
+        if (!mic) SpikeLog.append("audio RECORD_AUDIO is not granted; capture will fail")
+        engageAudio(_call.value?.speaker == true)
+    }
+
+    private fun mediaStatusName(status: Int): String = when (status) {
+        pjsua_call_media_status.PJSUA_CALL_MEDIA_NONE -> "none"
+        pjsua_call_media_status.PJSUA_CALL_MEDIA_ACTIVE -> "active"
+        pjsua_call_media_status.PJSUA_CALL_MEDIA_LOCAL_HOLD -> "local-hold"
+        pjsua_call_media_status.PJSUA_CALL_MEDIA_REMOTE_HOLD -> "remote-hold"
+        pjsua_call_media_status.PJSUA_CALL_MEDIA_ERROR -> "error"
+        else -> status.toString()
+    }
+
+    private fun trace(e: Throwable): String =
+        Log.getStackTraceString(e).lineSequence().take(6).joinToString(" | ")
 
     private fun engageAudio(speaker: Boolean) {
         applySpeaker(speaker)
