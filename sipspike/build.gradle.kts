@@ -10,7 +10,7 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "0.3"
+    ?: "0.4"
 val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 1
 
 base {

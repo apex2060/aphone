@@ -28,6 +28,7 @@ import org.pjsip.pjsua2.AudioMedia
 import org.pjsip.pjsua2.AuthCredInfo
 import org.pjsip.pjsua2.Call
 import org.pjsip.pjsua2.CallOpParam
+import org.pjsip.pjsua2.OnCallTsxStateParam
 import org.pjsip.pjsua2.Endpoint
 import org.pjsip.pjsua2.EpConfig
 import org.pjsip.pjsua2.IpChangeParam
@@ -123,6 +124,8 @@ class SipEngine(private val app: Application) {
     /** Strong refs so the GC cannot finalize a Call and hang it up. */
     private val liveCalls = ArrayList<SpikeCall>()
     @Volatile private var pendingReregister = false
+    private var loggedInvite = false
+    private val loggedResponses = HashSet<String>()
     private var audioMedia: AudioMedia? = null
     private var audioIndex = -1
     private var signaled = false
@@ -240,17 +243,8 @@ class SipEngine(private val app: Application) {
         if (wantRegister) pjsip.post { beginChain() }
     }
 
-    fun normalize(raw: String): String {
-        val trimmed = raw.trim()
-        if (trimmed.startsWith("sip:", ignoreCase = true)) return trimmed
-        val digits = trimmed.filter { it.isDigit() || it == '*' || it == '#' }
-        val cc = ConfigStore.config.value?.countryCode
-        return when {
-            trimmed.startsWith("+") -> digits
-            cc == "1" && digits.length == 10 -> "1$digits"
-            else -> digits
-        }
-    }
+    fun normalize(raw: String): String =
+        DialTarget.normalize(raw, ConfigStore.config.value?.countryCode)
 
     fun dial(raw: String): Boolean {
         if (_registration.value != Registration.ONLINE) return false
@@ -261,6 +255,13 @@ class SipEngine(private val app: Application) {
         _call.value = ui
         signaled = false
         uiCleared = false
+        loggedInvite = false
+        loggedResponses.clear()
+        val cfg = ConfigStore.config.value
+        SpikeLog.append(
+            "dial digits=$number country=${cfg?.countryCode ?: "none"} " +
+                "allowFreeDial=${cfg?.allowFreeDial != false}"
+        )
         pjsip.post { placeCall(ui) }
         return true
     }
@@ -352,8 +353,6 @@ class SipEngine(private val app: Application) {
             main.post { _call.value = null }
             return
         }
-        val uri = if (ui.number.startsWith("sip:", ignoreCase = true)) ui.number
-        else "sip:${ui.number}@phone.plivo.com"
         var next: SpikeCall? = null
         try {
             signaled = false
@@ -361,10 +360,16 @@ class SipEngine(private val app: Application) {
             prepareAudio("dial")
             next = SpikeCall(acc, this, incoming = false)
             retain(next)
+            val tls = currentMode != TransportMode.UDP
+            val target = DialTarget.requestUri(ui.number, tls)
             val prm = CallOpParam(true)
             prm.opt.audioCount = 1
-            next.makeCall(uri, prm)
-            SpikeLog.append("INVITE $uri audioCount=${prm.opt.audioCount}")
+            next.makeCall(target, prm)
+            SpikeLog.append(
+                "INVITE $target audioCount=${prm.opt.audioCount} " +
+                    "from=sip:$username@${DialTarget.DOMAIN} " +
+                    "proxy=${DialTarget.proxyUri(tls)} headers=none"
+            )
         } catch (e: Exception) {
             SpikeLog.append("INVITE failed: ${e.message}\n${trace(e)}")
             next?.let { failed ->
@@ -395,6 +400,7 @@ class SipEngine(private val app: Application) {
         publishNet(net)
         SpikeLog.append(net.detail)
         logDns("phone.plivo.com")
+        logDns(DialTarget.PROXY_HOST)
         logDns("mobile.phone.plivo.com")
         planSig = TransportPlan.signature(net.summary, net.hasIpv4)
         seenNetKey = TransportPlan.networkKey(planSig, net.addresses)
@@ -447,11 +453,11 @@ class SipEngine(private val app: Application) {
         val net = NetInfo.snapshot(app)
         val ca = caFile()
         if (mode == TransportMode.TLS_IPV6) {
-            val v6 = resolveAaaa()
-            if (!AddrOverride.set("phone.plivo.com", v6)) {
-                throw IllegalStateException("Could not pin phone.plivo.com to $v6")
+            val v6 = resolveAaaa(DialTarget.PROXY_HOST)
+            if (!AddrOverride.set(DialTarget.PROXY_HOST, v6)) {
+                throw IllegalStateException("Could not pin ${DialTarget.PROXY_HOST} to $v6")
             }
-            SpikeLog.append("pinned phone.plivo.com -> $v6 (AAAA of mobile.phone.plivo.com); TLS name phone.plivo.com")
+            SpikeLog.append("pinned ${DialTarget.PROXY_HOST} -> $v6; TLS name ${DialTarget.PROXY_HOST}")
         } else {
             AddrOverride.set(null, null)
             SpikeLog.append("DNS override cleared")
@@ -508,11 +514,13 @@ class SipEngine(private val app: Application) {
         )
 
         val accCfg = AccountConfig()
-        accCfg.idUri = "sip:$username@phone.plivo.com"
-        accCfg.regConfig.registrarUri = when (mode) {
-            TransportMode.TLS_IPV4, TransportMode.TLS_IPV6 -> "sip:phone.plivo.com:5061;transport=tls"
-            TransportMode.UDP -> "sip:phone.plivo.com:5060;transport=udp"
-        }
+        val tls = mode != TransportMode.UDP
+        accCfg.idUri = "sip:$username@${DialTarget.DOMAIN}"
+        accCfg.regConfig.registrarUri = DialTarget.registrarUri(tls)
+        // 22 Phone registers and dials through client.plivo.com. phone.plivo.com
+        // accepts the REGISTER and delivers inbound calls, and does not route
+        // an outbound INVITE to the PSTN.
+        accCfg.sipConfig.proxies.add(DialTarget.proxyUri(tls))
         accCfg.regConfig.timeoutSec = 120
         accCfg.regConfig.retryIntervalSec = 300
         accCfg.sipConfig.authCreds.add(AuthCredInfo("digest", "*", username, 0, password))
@@ -543,7 +551,10 @@ class SipEngine(private val app: Application) {
         val acc = SpikeAccount(this)
         acc.create(accCfg, true)
         account = acc
-        SpikeLog.append("account created registrar=${accCfg.regConfig.registrarUri}")
+        SpikeLog.append(
+            "account created registrar=${accCfg.regConfig.registrarUri} " +
+                "proxy=${DialTarget.proxyUri(tls)} from=${accCfg.idUri}"
+        )
     }
 
     private fun win(mode: TransportMode) {
@@ -630,10 +641,10 @@ class SipEngine(private val app: Application) {
         }
     }
 
-    private fun resolveAaaa(): String {
-        val all = InetAddress.getAllByName("mobile.phone.plivo.com").toList()
+    private fun resolveAaaa(host: String): String {
+        val all = InetAddress.getAllByName(host).toList()
         val v6 = all.filterIsInstance<Inet6Address>().firstOrNull { !it.isLinkLocalAddress }
-            ?: throw IllegalStateException("mobile.phone.plivo.com has no global AAAA on this network")
+            ?: throw IllegalStateException("$host has no global AAAA on this network")
         return v6.hostAddress?.substringBefore('%')
             ?: throw IllegalStateException("AAAA had no host address")
     }
@@ -828,6 +839,8 @@ class SipEngine(private val app: Application) {
         try {
             val next = SpikeCall(acc, callId, this, incoming = true)
             retain(next)
+            loggedInvite = false
+            loggedResponses.clear()
             // No-arg CallOpParam leaves audioCount at 0, and isEmpty() so pjsua
             // keeps the default audio line. 180 must not init media; 200 does.
             val ringing = CallOpParam()
@@ -916,6 +929,42 @@ class SipEngine(private val app: Application) {
         val ui = _call.value ?: return
         if (ui.phase == CallPhase.ENDED || ui.phase == CallPhase.ACTIVE) return
         main.post { _call.value = ui.copy(phase = phase, number = ui.number.ifBlank { displayNumber(remoteUri) }) }
+    }
+
+    private fun onCallTsx(prm: OnCallTsxStateParam) {
+        if (closing) return
+        try {
+            val ev = prm.e ?: return
+            val tsx = ev.body?.tsxState ?: return
+            val src = tsx.src
+            val sent = src?.tdata?.wholeMsg
+            if (!loggedInvite && !sent.isNullOrBlank() && sent.trimStart().startsWith("INVITE ", ignoreCase = true)) {
+                loggedInvite = true
+                SpikeLog.append("outbound INVITE\n${clipSip(sent)}")
+            }
+            val got = src?.rdata?.wholeMsg
+            if (!got.isNullOrBlank()) {
+                val line = got.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+                val key = line.substringBefore(";").take(80)
+                if (key.isNotEmpty() && loggedResponses.add(key)) {
+                    val code = tsx.tsx?.statusCode ?: 0
+                    SpikeLog.append("sip response $line code=$code")
+                    if (code == 401 || code == 407 || code >= 300) {
+                        SpikeLog.append("sip response\n${clipSip(got)}")
+                    }
+                    if (code == 401 || code == 407) {
+                        SpikeLog.append("digest challenge; pjsua answers with the account credentials")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            SpikeLog.append("tsx log failed: ${e.message}")
+        }
+    }
+
+    private fun clipSip(message: String): String {
+        val text = message.replace("\r\n", "\n").trim()
+        return if (text.length <= 6000) text else text.take(6000) + "\n…truncated"
     }
 
     private fun onCallMedia(current: SpikeCall) {
@@ -1290,6 +1339,10 @@ class SipEngine(private val app: Application) {
 
         override fun onCallMediaState(prm: OnCallMediaStateParam) {
             engine.onCallMedia(this)
+        }
+
+        override fun onCallTsxState(prm: OnCallTsxStateParam) {
+            if (!incoming) engine.onCallTsx(prm)
         }
     }
 }

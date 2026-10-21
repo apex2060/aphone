@@ -12,12 +12,14 @@ Setup matches 22 Phone. Scan the Comm Manager QR. The app POSTs that URL
 Long-press the title and enter the admin PIN for reset, or for a hidden
 manual SIP login.
 
-Transport is automatic:
+Transport is automatic. REGISTER and INVITE go to the Plivo outbound
+proxy `client.plivo.com`. The registrar and the From address stay
+`phone.plivo.com`.
 
-1. TLS `phone.plivo.com:5061`
+1. TLS `client.plivo.com:5061`
 2. On failure, or on cellular with no IPv4 source (no CLAT), TLS to an AAAA
-   of `mobile.phone.plivo.com` with the certificate name `phone.plivo.com`
-3. Then UDP `phone.plivo.com:5060`
+   of `client.plivo.com`
+3. Then UDP `client.plivo.com:5060`
 
 The transport that succeeds is remembered per network type (wifi, cellular,
 cellular with no IPv4). Details has a manual override. A change of network
@@ -35,7 +37,11 @@ The log is timestamped, stored in a rotating file capped around 2 MB, and
 shown in Details with Share and Copy. It records provisioning (password,
 provisioning key, and tokens redacted), DNS, addresses including IPv6 and
 CLAT, transport attempts, REGISTER/INVITE/BYE codes, call state, SDP, and
-RTP packet counts.
+RTP packet counts. An outbound call logs the normalized digits, the full
+INVITE (Authorization redacted), and every response code. The request URI
+is `sip:<digits>@phone.plivo.com;transport=tls`. Ten-digit numbers get the
+provisioned country code `1`. 22 Phone sends no X-PH headers, and neither
+does this app.
 
 PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 are prebuilt for `arm64-v8a`
 with 16 KB page alignment under `src/main/jniLibs`. CI does not compile them.
