@@ -27,6 +27,10 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - name: Write google-services.json when the secret is set
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: bash .github/workflows/write-google-services.sh
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
 
@@ -62,6 +66,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write google-services.json when the secret is set
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: bash .github/workflows/write-google-services.sh
 
       - name: Decode release keystore
         env:

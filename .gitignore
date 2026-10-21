@@ -11,3 +11,5 @@ server/devices.json
 *.keystore
 *.p12
 keystore.properties
+# Firebase config for this app. CI writes it from GOOGLE_SERVICES_JSON_BASE64.
+app/google-services.json

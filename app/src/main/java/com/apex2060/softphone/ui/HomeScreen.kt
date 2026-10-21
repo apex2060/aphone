@@ -61,6 +61,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
+import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.R
 import com.apex2060.softphone.config.ProvisionConfig
 import com.apex2060.softphone.history.CallHistory
@@ -134,13 +135,17 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
-    val reg by PhoneManager.registration.collectAsState()
+    val line by PhoneManager.lineStatus.collectAsState()
     var showLine by remember { mutableStateOf(false) }
-    val (dot, label) = when (reg) {
+    val (dot, label) = when (line.registration) {
         Registration.ONLINE -> LocalCallColors.current.accept to "Ready"
         Registration.CONNECTING -> MaterialTheme.colorScheme.onSurfaceVariant to "Connecting…"
         Registration.FAILED -> LocalCallColors.current.decline to "Offline, retrying"
-        Registration.OFFLINE -> LocalCallColors.current.decline to "Offline"
+        Registration.OFFLINE -> if (line.pushEnabled && !line.stayRegistered) {
+            LocalCallColors.current.accept to "Push"
+        } else {
+            LocalCallColors.current.decline to "Offline"
+        }
     }
     Column(
         Modifier
@@ -205,12 +210,25 @@ private fun LineStatusDialog(onDismiss: () -> Unit) {
                 StatusLine("Last invite", ago(line.lastInviteAt))
                 StatusLine("Invite from", line.lastInviteFrom ?: "none yet")
                 StatusLine("Invite Call-ID", line.lastInviteCallId ?: "—")
+                StatusLine("Push", if (line.pushEnabled) "enabled" else "disabled")
+                StatusLine("FCM token", line.fcmTokenMasked)
+                StatusLine("Last push", listOfNotNull(line.lastPushFrom, ago(line.lastPushAt).takeIf { line.lastPushAt != null }).joinToString(" · ").ifBlank { "none" })
+                StatusLine("Last relay", line.lastRelayResult)
                 StatusLine("Notifications", if (notifications) "allowed" else "denied")
                 StatusLine("Full-screen alerts", if (fullScreen) "allowed" else "denied")
                 StatusLine("Battery", if (battery) "unrestricted" else "optimized")
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        confirmButton = {
+            Row {
+                if (BuildConfig.DEBUG) TextButton(onClick = {
+                    val next = !line.stayRegistered
+                    PhoneManager.setStayRegistered(next)
+                    if (next) PhoneService.startStay(context) else PhoneService.stopStay(context)
+                }) { Text(if (line.stayRegistered) "Stop stay registered" else "Stay registered") }
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
         dismissButton = {
             Row {
                 if (!notifications) TextButton(onClick = {
@@ -280,7 +298,6 @@ private val KEYS = listOf(
 @Composable
 private fun Keypad(onDial: (String) -> Unit) {
     var number by remember { mutableStateOf("") }
-    val reg by PhoneManager.registration.collectAsState()
     Column(
         Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -303,7 +320,7 @@ private fun Keypad(onDial: (String) -> Unit) {
             Spacer(Modifier.size(64.dp))
             RoundButton(
                 R.drawable.ic_call, LocalCallColors.current.accept, size = 72,
-                enabled = reg == Registration.ONLINE && number.isNotEmpty(),
+                enabled = number.isNotEmpty(),
             ) { onDial(number) }
             Box(
                 Modifier.size(64.dp).clip(CircleShape)
