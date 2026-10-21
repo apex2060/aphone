@@ -67,6 +67,10 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".phone.RecordingActionReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

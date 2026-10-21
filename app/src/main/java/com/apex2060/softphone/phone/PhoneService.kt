@@ -26,6 +26,7 @@ import com.apex2060.softphone.config.Provisioner
 import com.apex2060.softphone.config.RevokedException
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.Outcome
+import com.apex2060.softphone.record.Recordings
 import com.apex2060.softphone.ui.CallActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -270,6 +271,7 @@ class PhoneService : Service() {
         fun deprovision(context: Context) {
             val app = context.applicationContext as SoftphoneApp
             app.engine.logout()
+            Recordings.discard(context)
             CallHistory.clear()
             ConfigStore.clear()
             context.getSystemService(NotificationManager::class.java).cancelAll()

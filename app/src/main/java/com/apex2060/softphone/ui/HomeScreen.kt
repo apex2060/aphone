@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -314,24 +315,35 @@ private fun SpeedDials(config: ProvisionConfig, onDial: (String) -> Unit) {
 private fun Recents(engine: SipEngine, config: ProvisionConfig, onDial: (String) -> Unit) {
     val records by CallHistory.records.collectAsState()
     val names = remember(config) { config.speedDials.associate { engine.normalize(it.number) to it.label } }
+    var chosen by remember { mutableStateOf<CallRecord?>(null) }
     if (records.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No calls yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        return
-    }
-    LazyColumn(Modifier.fillMaxSize()) {
-        items(records, key = { it.id }) { r ->
-            val name = names[engine.normalize(r.number)]
-            val canCall = config.allowFreeDial || name != null
-            RecentRow(r, name, enabled = canCall) { onDial(r.number) }
-            HorizontalDivider(color = MaterialTheme.colorScheme.surface)
+    } else {
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(records, key = { it.id }) { r ->
+                val name = names[engine.normalize(r.number)]
+                val canCall = config.allowFreeDial || name != null
+                RecentRow(
+                    r, name, enabled = canCall,
+                    onRecording = r.recording?.let { { chosen = r } },
+                ) { onDial(r.number) }
+                HorizontalDivider(color = MaterialTheme.colorScheme.surface)
+            }
         }
     }
+    chosen?.let { RecordingActions(it, onDismiss = { chosen = null }) }
 }
 
 @Composable
-private fun RecentRow(r: CallRecord, name: String?, enabled: Boolean, onCall: () -> Unit) {
+private fun RecentRow(
+    r: CallRecord,
+    name: String?,
+    enabled: Boolean,
+    onRecording: (() -> Unit)?,
+    onCall: () -> Unit,
+) {
     val missed = r.outcome == Outcome.MISSED
     val detail = buildString {
         append(if (r.direction == Direction.INCOMING) "Incoming" else "Outgoing")
@@ -357,6 +369,16 @@ private fun RecentRow(r: CallRecord, name: String?, enabled: Boolean, onCall: ()
                 color = if (missed) LocalCallColors.current.decline else MaterialTheme.colorScheme.onBackground,
             )
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (onRecording != null) {
+            IconButton(onClick = onRecording) {
+                Icon(
+                    painterResource(R.drawable.ic_recording),
+                    contentDescription = "Recording",
+                    tint = LocalCallColors.current.decline,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
         if (enabled) Icon(painterResource(R.drawable.ic_call), "Call back", tint = LocalCallColors.current.accept)
     }

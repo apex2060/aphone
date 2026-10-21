@@ -20,10 +20,13 @@ import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneService
+import com.apex2060.softphone.record.Recordings
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Recordings.restoreDialog(this)
+        openRecordingPrompt(intent)
         val engine = (application as SoftphoneApp).engine
         setContent {
             val config by ConfigStore.config.collectAsState()
@@ -46,9 +49,16 @@ class MainActivity : ComponentActivity() {
                     HomeScreen(cfg, onOpenCall = ::openCall, onDial = { number ->
                         if (engine.dial(number)) openCall()
                     })
+                    RecordingPromptHost()
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openRecordingPrompt(intent)
     }
 
     override fun onStart() {
@@ -69,6 +79,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openCall() = startActivity(Intent(this, CallActivity::class.java))
+
+    private fun openRecordingPrompt(intent: Intent?) {
+        if (intent?.getBooleanExtra(Recordings.EXTRA_PROMPT, false) != true) return
+        intent.removeExtra(Recordings.EXTRA_PROMPT)
+        Recordings.showPrompt(this)
+    }
 
     @SuppressLint("BatteryLife")
     private fun askBatteryExemption() {

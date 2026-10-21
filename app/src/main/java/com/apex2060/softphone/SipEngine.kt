@@ -20,6 +20,8 @@ import com.twentytwo.phone.sipspike.AddrOverride
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.Direction
 import com.apex2060.softphone.history.Outcome
+import com.apex2060.softphone.record.CallRecording
+import com.apex2060.softphone.record.Recordings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -133,6 +135,7 @@ class SipEngine(private val app: Application) {
     private var sawEarly = false
     private var triedClient = false
     private var audioMedia: AudioMedia? = null
+    private val callRecording = CallRecording(app)
     private var audioIndex = -1
     private var signaled = false
     private var uiCleared = false
@@ -323,6 +326,7 @@ class SipEngine(private val app: Application) {
         loggedResponses.clear()
         sawEarly = false
         triedClient = false
+        callRecording.reset()
         val cfg = ConfigStore.config.value
         val route = ConfigStore.outboundRoute()
         SpikeLog.append(
@@ -781,6 +785,7 @@ class SipEngine(private val app: Application) {
 
     private fun destroyStack() {
         closing = true
+        val recorded = callRecording.stop()
         stopRtp()
         val dropped = _call.value
         if (callObj != null && dropped != null && dropped.phase != CallPhase.ENDED) {
@@ -791,7 +796,7 @@ class SipEngine(private val app: Application) {
         }
         if (dropped != null && dropped.phase != CallPhase.ENDED) {
             val duration = dropped.answeredAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
-            CallHistory.add(
+            val historyId = CallHistory.add(
                 number = dropped.number,
                 direction = dropped.direction,
                 outcome = if (dropped.answeredAt != null) Outcome.COMPLETED else Outcome.FAILED,
@@ -799,8 +804,15 @@ class SipEngine(private val app: Application) {
                 durationSec = duration,
                 limit = ConfigStore.config.value?.historyLimit ?: 200,
             )
+            offerRecording(recorded, historyId, dropped.number, dropped.startedAt)
             uiCleared = true
             main.post { if (_call.value?.startedAt == dropped.startedAt) _call.value = null }
+        } else if (recorded != null && dropped != null) {
+            val row = CallHistory.records.value.firstOrNull {
+                it.startedAt == dropped.startedAt && it.number == dropped.number && it.recording == null
+            }
+            if (row != null) offerRecording(recorded, row.id, row.number, row.startedAt)
+            else recorded.delete()
         }
         val dying = callObj
         callObj = null
@@ -936,6 +948,7 @@ class SipEngine(private val app: Application) {
             next.answer(ringing)
             signaled = false
             uiCleared = false
+            callRecording.reset()
             val from = displayNumber(runCatching { next.info.remoteUri }.getOrDefault(""))
             SpikeLog.append("INVITE incoming from $from")
             val ui = CallUi(Direction.INCOMING, from, CallPhase.RINGING_IN)
@@ -988,6 +1001,8 @@ class SipEngine(private val app: Application) {
                 }
                 engageAudio(speaker = ui?.speaker == true)
                 startRtp()
+                callRecording.markConfirmed()
+                callRecording.startIfReady(audioMedia, captureMedia())
             }
             pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED -> {
                 if (ui != null && DialTarget.shouldRetryViaClient(
@@ -1129,6 +1144,7 @@ class SipEngine(private val app: Application) {
                 audioMedia = am
                 audioIndex = i
                 SpikeLog.append("audio connected")
+                callRecording.startIfReady(am, mgr.captureDevMedia)
                 logSdpDump(current)
             } catch (e: Exception) {
                 SpikeLog.append("audio connect failed: ${e.message}\n${trace(e)}")
@@ -1185,6 +1201,7 @@ class SipEngine(private val app: Application) {
      * the local call. A remote disconnect skips a second hangup.
      */
     private fun finish(fromRemote: Boolean, outcome: Outcome, label: String, code: Int) {
+        val recorded = callRecording.stop()
         val current = callObj
         if (!fromRemote && !signaled && current != null) {
             signaled = true
@@ -1204,13 +1221,22 @@ class SipEngine(private val app: Application) {
         }
         val ui = _call.value
         if (uiCleared || ui == null) {
+            if (recorded != null) {
+                val row = ui?.let { call ->
+                    CallHistory.records.value.firstOrNull {
+                        it.recording == null && it.startedAt == call.startedAt && it.number == call.number
+                    }
+                }
+                if (row != null) offerRecording(recorded, row.id, row.number, row.startedAt)
+                else recorded.delete()
+            }
             if (fromRemote) scheduleDelete(current)
             return
         }
         uiCleared = true
         stopRtp()
         val duration = ui.answeredAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
-        if (ui.phase != CallPhase.ENDED) {
+        val historyId = if (ui.phase != CallPhase.ENDED) {
             CallHistory.add(
                 number = ui.number,
                 direction = ui.direction,
@@ -1219,7 +1245,10 @@ class SipEngine(private val app: Application) {
                 durationSec = duration,
                 limit = ConfigStore.config.value?.historyLimit ?: 200,
             )
+        } else {
+            -1L
         }
+        offerRecording(recorded, historyId, ui.number, ui.startedAt)
         abandonAudio()
         audioMedia = null
         val ended = ui.copy(phase = CallPhase.ENDED, endedLabel = label, outcome = outcome)
@@ -1237,6 +1266,22 @@ class SipEngine(private val app: Application) {
                 beginChain()
             }
         }
+    }
+
+    private fun offerRecording(file: File?, historyId: Long, number: String, startedAt: Long) {
+        if (file == null) return
+        if (historyId <= 0) {
+            file.delete()
+            SpikeLog.append("recording dropped, no history row")
+            return
+        }
+        main.post { Recordings.offer(app, historyId, number, startedAt, file, isAppForeground()) }
+    }
+
+    private fun captureMedia(): AudioMedia? = try {
+        ep?.audDevManager()?.captureDevMedia
+    } catch (_: Exception) {
+        null
     }
 
     private fun scheduleDelete(current: SpikeCall?) {

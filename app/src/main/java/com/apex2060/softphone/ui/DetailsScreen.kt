@@ -6,7 +6,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.os.SystemClock
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -48,6 +50,7 @@ import com.apex2060.softphone.UiText
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneService
+import com.apex2060.softphone.record.TapSeries
 import java.io.File
 
 @Composable
@@ -57,6 +60,8 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
     val selected = ConfigStore.transportOverride()
     var outbound by remember { mutableStateOf(ConfigStore.outboundRoute()) }
     val probe by ClientProbe.text.collectAsState()
+    val autoRecording by ConfigStore.autoRecording.collectAsState()
+    val taps = remember { TapSeries() }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp),
@@ -64,7 +69,24 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("Back") }
-                Text("Details", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text(
+                    "Details",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            if (taps.hit(SystemClock.elapsedRealtime())) {
+                                val on = !ConfigStore.autoRecording.value
+                                ConfigStore.setAutoRecording(on)
+                                Toast.makeText(
+                                    context,
+                                    if (on) "Auto recording on" else "Auto recording off",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        }
+                        .padding(vertical = 4.dp),
+                )
             }
             val phoneOn by ConfigStore.phoneEnabled.collectAsState()
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -79,6 +101,13 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
                         onCheckedChange = { on ->
                             if (on) PhoneService.turnOn(context) else PhoneService.turnOff(context)
                         },
+                    )
+                }
+                if (autoRecording) {
+                    Text(
+                        "Auto recording: On",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 StatusLine("Registration", if (phoneOn) UiText.scrub(line.status) else "Phone is off")

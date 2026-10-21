@@ -17,6 +17,7 @@ import com.apex2060.softphone.CallUi
 import com.apex2060.softphone.R
 import com.apex2060.softphone.Registration
 import com.apex2060.softphone.config.ConfigStore
+import com.apex2060.softphone.record.Recordings
 import com.apex2060.softphone.ui.CallActivity
 import com.apex2060.softphone.ui.MainActivity
 
@@ -24,10 +25,12 @@ object Notifications {
     const val ID_SERVICE = 1
     const val ID_INCOMING = 2
     const val ID_MISSED = 3
+    const val ID_RECORDING = 4
 
     private const val CH_STATUS = "status"
     private const val CH_INCOMING = "incoming_v2"
     private const val CH_MISSED = "missed"
+    private const val CH_RECORDING = "recording"
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -46,6 +49,11 @@ object Notifications {
         )
         nm.createNotificationChannel(
             NotificationChannel(CH_MISSED, "Missed calls", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CH_RECORDING, "Call recordings", NotificationManager.IMPORTANCE_HIGH).apply {
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
         )
     }
 
@@ -123,6 +131,46 @@ object Notifications {
             .build()
             .apply { flags = flags or Notification.FLAG_INSISTENT }
     }
+
+    fun showRecordingPrompt(context: Context, number: String, token: String) {
+        context.getSystemService(NotificationManager::class.java)
+            .notify(ID_RECORDING, recordingPrompt(context, number, token))
+    }
+
+    /** Plain notification. CallStyle would keep a lock-screen timer, so this stays a normal alert. */
+    fun recordingPrompt(context: Context, number: String, token: String): Notification =
+        NotificationCompat.Builder(context, CH_RECORDING)
+            .setSmallIcon(R.drawable.ic_recording)
+            .setContentTitle("Save this call recording?")
+            .setContentText(number.ifBlank { "Call" })
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setAutoCancel(false)
+            .setContentIntent(openRecordingPrompt(context))
+            .setDeleteIntent(recordingAction(context, Recordings.ACTION_DISMISSED, token, 43))
+            .addAction(0, "Save", recordingAction(context, Recordings.ACTION_SAVE, token, 41))
+            .addAction(0, "Discard", recordingAction(context, Recordings.ACTION_DISCARD, token, 42))
+            .build()
+
+    private fun openRecordingPrompt(context: Context) = PendingIntent.getActivity(
+        context,
+        40,
+        Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(Recordings.EXTRA_PROMPT, true),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
+    private fun recordingAction(context: Context, action: String, token: String, request: Int) =
+        PendingIntent.getBroadcast(
+            context,
+            request,
+            Intent(context, RecordingActionReceiver::class.java)
+                .setAction(action)
+                .putExtra(Recordings.EXTRA_TOKEN, token),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
 
     fun missed(context: Context, number: String): Notification =
         NotificationCompat.Builder(context, CH_MISSED)

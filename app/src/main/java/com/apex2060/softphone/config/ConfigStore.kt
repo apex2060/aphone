@@ -21,12 +21,15 @@ object ConfigStore {
     private const val KEY_MANUAL_USER = "manual_user"
     private const val KEY_MANUAL_PASS = "manual_pass"
     private const val KEY_PHONE = "phone_enabled"
+    private const val KEY_AUTO_RECORD = "auto_recording"
 
     private lateinit var prefs: SharedPreferences
     private val _config = MutableStateFlow<ProvisionConfig?>(null)
     val config: StateFlow<ProvisionConfig?> = _config
     private val _phoneEnabled = MutableStateFlow(true)
     val phoneEnabled: StateFlow<Boolean> = _phoneEnabled
+    private val _autoRecording = MutableStateFlow(false)
+    val autoRecording: StateFlow<Boolean> = _autoRecording
 
     fun init(context: Context) {
         // Same file v1.0.5 used, so an in-place upgrade keeps the QR line.
@@ -38,12 +41,19 @@ object ConfigStore {
         }
         _config.value?.sipPassword?.let { SpikeLog.noteSecret(it) }
         _phoneEnabled.value = prefs.getBoolean(KEY_PHONE, true)
+        _autoRecording.value = prefs.getBoolean(KEY_AUTO_RECORD, false)
     }
 
     /** Default on, so an upgrade of a working phone keeps registering. */
     fun setPhoneEnabled(on: Boolean) {
         prefs.edit().putBoolean(KEY_PHONE, on).apply()
         _phoneEnabled.value = on
+    }
+
+    /** Hidden. Toggled from the Details title, not from a visible setting. */
+    fun setAutoRecording(on: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_RECORD, on).apply()
+        _autoRecording.value = on
     }
 
     val ticket: ProvisionTicket?
@@ -131,6 +141,7 @@ object ConfigStore {
     fun clear() {
         prefs.edit().clear().apply()
         _config.value = null
+        _autoRecording.value = false
     }
 
     private fun winKey(signature: String) = "transport_win_$signature"
