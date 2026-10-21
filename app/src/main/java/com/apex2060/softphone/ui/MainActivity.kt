@@ -2,6 +2,7 @@ package com.apex2060.softphone.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -48,6 +49,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        PhoneManager.onActivityStarted()
+    }
+
+    override fun onStop() {
+        PhoneManager.onActivityStopped()
+        super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (ConfigStore.config.value == null) return
+        PhoneManager.refreshRegistration("resume")
+        // Battery is requested from the permission result. Ask for full-screen on the next resume
+        // so the two settings screens are not stacked.
+        if (ConfigStore.askedBattery) askFullScreenIntent()
+    }
+
     private fun openCall() = startActivity(Intent(this, CallActivity::class.java))
 
     /** A VoIP phone that sleeps through calls is useless; ask once to be exempt from Doze. */
@@ -56,10 +76,26 @@ class MainActivity : ComponentActivity() {
         if (ConfigStore.askedBattery) return
         ConfigStore.askedBattery = true
         val pm = getSystemService(PowerManager::class.java)
-        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            val opened = runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                )
+            }.isSuccess
+            if (opened) return
+        }
+        askFullScreenIntent()
+    }
+
+    /** Android 14+ does not grant full-screen incoming call UI to a sideloaded app. Ask once. */
+    private fun askFullScreenIntent() {
+        if (Build.VERSION.SDK_INT < 34 || ConfigStore.askedFullScreen) return
+        val nm = getSystemService(NotificationManager::class.java)
+        ConfigStore.askedFullScreen = true
+        if (nm.canUseFullScreenIntent()) return
         runCatching {
             startActivity(
-                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName"))
             )
         }
     }

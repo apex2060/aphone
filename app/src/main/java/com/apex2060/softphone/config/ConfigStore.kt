@@ -12,6 +12,7 @@ object ConfigStore {
     private const val KEY_SECRET = "provision_key"
     private const val KEY_REFRESHED = "refreshed_at"
     private const val KEY_ASKED_BATTERY = "asked_battery"
+    private const val KEY_ASKED_FULL_SCREEN = "asked_full_screen"
 
     private lateinit var prefs: SharedPreferences
     private val _config = MutableStateFlow<ProvisionConfig?>(null)
@@ -32,6 +33,10 @@ object ConfigStore {
     var askedBattery: Boolean
         get() = prefs.getBoolean(KEY_ASKED_BATTERY, false)
         set(value) = prefs.edit().putBoolean(KEY_ASKED_BATTERY, value).apply()
+
+    var askedFullScreen: Boolean
+        get() = prefs.getBoolean(KEY_ASKED_FULL_SCREEN, false)
+        set(value) = prefs.edit().putBoolean(KEY_ASKED_FULL_SCREEN, value).apply()
 
     fun save(ticket: ProvisionTicket, json: String, config: ProvisionConfig) {
         prefs.edit()

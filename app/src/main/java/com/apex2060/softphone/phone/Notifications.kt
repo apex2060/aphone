@@ -6,9 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
-import android.media.RingtoneManager
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.app.Person
 import com.apex2060.softphone.R
 import com.apex2060.softphone.config.ConfigStore
@@ -21,7 +23,8 @@ object Notifications {
     const val ID_MISSED = 3
 
     private const val CH_STATUS = "status"
-    private const val CH_INCOMING = "incoming"
+    /** New id: an existing "incoming" channel keeps its old sound and cannot be changed in place. */
+    private const val CH_INCOMING = "incoming_v2"
     private const val CH_MISSED = "missed"
 
     fun createChannels(context: Context) {
@@ -31,17 +34,12 @@ object Notifications {
                 setShowBadge(false)
             }
         )
+        // Sound and vibration are played by PhoneService. A sounding channel would ring twice.
+        nm.deleteNotificationChannel("incoming")
         nm.createNotificationChannel(
             NotificationChannel(CH_INCOMING, context.getString(R.string.notif_channel_incoming), NotificationManager.IMPORTANCE_HIGH).apply {
-                setSound(
-                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                )
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 800, 600, 800, 600)
+                setSound(null, null)
+                enableVibration(false)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
         )
@@ -121,6 +119,21 @@ object Notifications {
             .build()
             .apply { flags = flags or Notification.FLAG_INSISTENT }
     }
+
+    fun notificationsAllowed(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 33) return true
+        return ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    /** Android 14+ sideload installs do not grant this until the user allows it in settings. */
+    fun canUseFullScreenIntent(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 34) return true
+        return context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+    }
+
+    fun batteryUnrestricted(context: Context): Boolean =
+        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
 
     fun missed(context: Context, number: String): Notification =
         NotificationCompat.Builder(context, CH_MISSED)
