@@ -19,8 +19,8 @@ data class ThemeColors(
 )
 
 /**
- * The provisioning document returned by the setup endpoint. See docs/PROVISIONING.md
- * for the wire format; only `sip.username` and `sip.password` are required.
+ * The provisioning document returned by the setup endpoint. Same fields as
+ * 22 Phone. See docs/PROVISIONING.md. Only sip.username and sip.password are required.
  */
 data class ProvisionConfig(
     val title: String,

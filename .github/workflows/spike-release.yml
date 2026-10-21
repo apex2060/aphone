@@ -93,16 +93,47 @@ jobs:
               exit 1
               ;;
           esac
-          version_name="${tag#spike-pjsip-v}"
-          if [ "$version_name" = "$tag" ]; then
-            version_name="$tag"
+          if [ "$tag" = "spike-pjsip-v0.6-official" ]; then
+            version_name="1.1.0"
+            version_code="15"
+            official="true"
+          else
+            version_name="${tag#spike-pjsip-v}"
+            if [ "$version_name" = "$tag" ]; then
+              version_name="$tag"
+            fi
+            version_code="${GITHUB_RUN_NUMBER}"
+            official="false"
           fi
           echo "version_name=${version_name}" >> "$GITHUB_OUTPUT"
-          echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
+          echo "official=${official}" >> "$GITHUB_OUTPUT"
           echo "VERSION_NAME=${version_name}" >> "$GITHUB_ENV"
-          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${version_code}" >> "$GITHUB_ENV"
+          echo "OFFICIAL=${official}" >> "$GITHUB_ENV"
+
+      - name: Build signed official APK
+        if: env.OFFICIAL == 'true'
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/22phone-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon :app:assembleRelease \
+            -PversionName="${VERSION_NAME}" \
+            -PversionCode="${VERSION_CODE}"
+          apk="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$apk" ]; then
+            echo "::error::Signed 22 Phone APK was not produced."
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$apk" dist/22phone.apk
 
       - name: Build signed spike APK
+        if: env.OFFICIAL != 'true'
         env:
           ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/22phone-release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -121,7 +152,38 @@ jobs:
           mkdir -p dist
           cp "$apk" dist/22siptest.apk
 
-      - name: Verify signature, package, and 16 KB alignment
+      - name: Verify official signature, package, and 16 KB alignment
+        if: env.OFFICIAL == 'true'
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          apksigner="$(find "$sdk/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          aapt="$(find "$sdk/build-tools" -type f -name aapt | sort -V | tail -1)"
+          if [ -z "$apksigner" ] || [ -z "$aapt" ]; then
+            echo "::error::apksigner or aapt was not found under ${sdk}."
+            exit 1
+          fi
+          "$apksigner" verify --verbose dist/22phone.apk
+          certs="$("$apksigner" verify --print-certs dist/22phone.apk)"
+          printf '%s\n' "$certs"
+          if printf '%s\n' "$certs" | grep -q "CN=Android Debug"; then
+            echo "::error::APK is signed with the Android debug certificate."
+            exit 1
+          fi
+          if ! printf '%s\n' "$certs" | grep -q "CN=22 Phone"; then
+            echo "::error::APK is not signed with CN=22 Phone, so it cannot upgrade v1.0.5."
+            exit 1
+          fi
+          badging="$("$aapt" dump badging dist/22phone.apk)"
+          printf '%s\n' "$badging" | grep -E "package:|application-label:|native-code:"
+          printf '%s\n' "$badging" | grep -F -q "package: name='com.apex2060.softphone'"
+          printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
+          printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
+          printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"
+          python3 sipspike/third_party/check-elf-alignment.py dist/22phone.apk
+
+      - name: Verify spike signature, package, and 16 KB alignment
+        if: env.OFFICIAL != 'true'
         run: |
           set -euo pipefail
           sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
@@ -148,8 +210,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: 22siptest
-          path: dist/22siptest.apk
+          name: ${{ env.OFFICIAL == 'true' && '22phone' || '22siptest' }}
+          path: ${{ env.OFFICIAL == 'true' && 'dist/22phone.apk' || 'dist/22siptest.apk' }}
           if-no-files-found: error
 
       - name: Attach APK to a prerelease
@@ -158,20 +220,36 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          notes=$(printf '%s\n' \
-            "Throwaway 22 SIP Test build. This is not a 22 Phone release." \
-            "" \
-            "- package: com.twentytwo.phone.sipspike" \
-            "- versionName: ${VERSION_NAME}" \
-            "- versionCode: ${VERSION_CODE}" \
-            "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
-            "" \
-            "Install beside 22 Phone. Test steps are in sipspike/README.md." \
-            "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/22siptest.apk --clobber
+          if [ "${OFFICIAL}" = "true" ]; then
+            asset="dist/22phone.apk"
+            notes=$(printf '%s\n' \
+              "Signed 22 Phone test build. This is not a v* release and it is not merged." \
+              "" \
+              "- package: com.apex2060.softphone" \
+              "- versionName: ${VERSION_NAME}" \
+              "- versionCode: ${VERSION_CODE} (v1.0.5 is versionCode 14)" \
+              "- label: 22 Phone" \
+              "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
+              "" \
+              "Install over 22 Phone v1.0.5. The signing certificate is CN=22 Phone." \
+              "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
           else
-            gh release create "$tag" dist/22siptest.apk \
+            asset="dist/22siptest.apk"
+            notes=$(printf '%s\n' \
+              "Throwaway 22 SIP Test build. This is not a 22 Phone release." \
+              "" \
+              "- package: com.twentytwo.phone.sipspike" \
+              "- versionName: ${VERSION_NAME}" \
+              "- versionCode: ${VERSION_CODE}" \
+              "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
+              "" \
+              "Install beside 22 Phone. Test steps are in sipspike/README.md." \
+              "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" \
               --prerelease \
               --title "$tag" \
               --notes "$notes"

@@ -1,9 +1,5 @@
 package com.apex2060.softphone.ui
 
-import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
 import android.text.format.DateUtils
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -15,25 +11,21 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -61,19 +53,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
+import com.apex2060.softphone.CallPhase
 import com.apex2060.softphone.R
+import com.apex2060.softphone.Registration
+import com.apex2060.softphone.UiText
+import com.apex2060.softphone.SipEngine
+import com.apex2060.softphone.SoftphoneApp
+import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.ProvisionConfig
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.CallRecord
 import com.apex2060.softphone.history.Direction
 import com.apex2060.softphone.history.Outcome
-import com.apex2060.softphone.phone.CallPhase
-import com.apex2060.softphone.phone.describesLocalStackFailure
-import com.apex2060.softphone.phone.LineStatus
-import com.apex2060.softphone.phone.Notifications
-import com.apex2060.softphone.phone.PhoneManager
 import com.apex2060.softphone.phone.PhoneService
-import com.apex2060.softphone.phone.Registration
 
 private enum class Tab(val label: String, @DrawableRes val icon: Int) {
     KEYPAD("Keypad", R.drawable.ic_dialpad),
@@ -81,8 +73,17 @@ private enum class Tab(val label: String, @DrawableRes val icon: Int) {
     RECENTS("Recents", R.drawable.ic_history),
 }
 
+private val KEYS = listOf(
+    '1' to "", '2' to "ABC", '3' to "DEF",
+    '4' to "GHI", '5' to "JKL", '6' to "MNO",
+    '7' to "PQRS", '8' to "TUV", '9' to "WXYZ",
+    '*' to "", '0' to "+", '#' to "",
+)
+
 @Composable
 fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String) -> Unit) {
+    val context = LocalContext.current
+    val engine = (context.applicationContext as SoftphoneApp).engine
     val tabs = buildList {
         if (config.allowFreeDial) add(Tab.KEYPAD)
         if (config.speedDials.isNotEmpty()) add(Tab.SPEED)
@@ -91,11 +92,27 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
     var selected by remember { mutableIntStateOf(0) }
     val tab = tabs[selected.coerceIn(0, tabs.lastIndex)]
     var showReset by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
+    val phoneOn by ConfigStore.phoneEnabled.collectAsState()
+
+    if (showDetails) {
+        DetailsScreen(engine, onBack = { showDetails = false })
+        return
+    }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Header(config, onLongPress = { showReset = true })
-            val call by PhoneManager.call.collectAsState()
+            Header(
+                config, engine, phoneOn,
+                onLongPress = { showReset = true },
+                onDetails = { showDetails = true },
+                onTurnOff = { PhoneService.turnOff(context) },
+            )
+            if (!phoneOn) {
+                PhoneOff { PhoneService.turnOn(context) }
+                return@Column
+            }
+            val call by engine.call.collectAsState()
             if (call != null && call?.phase != CallPhase.ENDED) {
                 Text(
                     "Call in progress · tap to return",
@@ -110,9 +127,9 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
             }
             Box(Modifier.weight(1f)) {
                 when (tab) {
-                    Tab.KEYPAD -> Keypad(onDial)
+                    Tab.KEYPAD -> Keypad(engine, onDial)
                     Tab.SPEED -> SpeedDials(config, onDial)
-                    Tab.RECENTS -> Recents(config, onDial)
+                    Tab.RECENTS -> Recents(engine, config, onDial)
                 }
             }
             if (tabs.size > 1) {
@@ -129,35 +146,41 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
             }
         }
     }
-    if (showReset) ResetDialog(config, onDismiss = { showReset = false })
+    if (showReset) ResetDialog(config, engine, onDismiss = { showReset = false })
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
-    val line by PhoneManager.lineStatus.collectAsState()
-    var showLine by remember { mutableStateOf(false) }
-    val (dot, label) = when (line.registration) {
+private fun Header(
+    config: ProvisionConfig,
+    engine: SipEngine,
+    phoneOn: Boolean,
+    onLongPress: () -> Unit,
+    onDetails: () -> Unit,
+    onTurnOff: () -> Unit,
+) {
+    val line by engine.line.collectAsState()
+    val reg by engine.registration.collectAsState()
+    val (dot, label) = if (!phoneOn) {
+        MaterialTheme.colorScheme.onSurfaceVariant to "Phone is off"
+    } else when (reg) {
         Registration.ONLINE -> LocalCallColors.current.accept to "Ready"
         Registration.CONNECTING -> MaterialTheme.colorScheme.onSurfaceVariant to "Connecting…"
-        Registration.FAILED -> LocalCallColors.current.decline to failureLabel(line.lastRegisterResult)
+        Registration.FAILED -> LocalCallColors.current.decline to "Failed, retrying"
         Registration.OFFLINE -> LocalCallColors.current.decline to "Offline"
     }
+    val network = UiText.networkIndicator(line.network)
     Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.primary)
-            .padding(horizontal = 20.dp, vertical = 16.dp)
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary).padding(horizontal = 20.dp, vertical = 16.dp)
     ) {
         Text(
             config.title, color = MaterialTheme.colorScheme.onPrimary,
             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
-            // Hidden admin gesture: long-press the title to reset the phone.
             modifier = Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress),
         )
         Row(
-            Modifier.fillMaxWidth().clickable { showLine = true }.padding(top = 2.dp),
+            Modifier.fillMaxWidth().padding(top = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
@@ -166,159 +189,64 @@ private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
                 listOfNotNull(config.subtitle, label).joinToString(" · "),
                 color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).clickable(onClick = onDetails),
             )
+            if (phoneOn) {
+                Text(
+                    "Turn off",
+                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.clickable(onClick = onTurnOff).padding(end = 12.dp),
+                )
+            }
             Text(
                 "Details",
                 color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.clickable(onClick = onDetails),
+            )
+        }
+        if (network.isNotEmpty()) {
+            Text(
+                network,
+                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
         }
     }
-    if (showLine) LineStatusDialog(onDismiss = { showLine = false })
 }
 
 @Composable
-private fun LineStatusDialog(onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val line by PhoneManager.lineStatus.collectAsState()
-    val notifications = Notifications.notificationsAllowed(context)
-    val fullScreen = Notifications.canUseFullScreenIntent(context)
-    val battery = Notifications.batteryUnrestricted(context)
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Line status") },
-        text = {
-            Column(
-                Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                StatusLine("Registration", registrationLabel(line))
-                StatusLine("SDK registered", if (line.sdkRegistered) "yes" else "no")
-                StatusLine("Expiry", if (line.regTimeoutSec > 0) "${line.regTimeoutSec}s" else "—")
-                StatusLine("Username", line.username ?: "—")
-                StatusLine("Last login", line.lastRegisterResult)
-                StatusLine("Login started", stamp(context, line.loginAttemptAt))
-                StatusLine("Login result at", stamp(context, line.lastRegisterAt))
-                StatusLine("SDK reason", line.lastSdkReason ?: "none")
-                if (describesLocalStackFailure(line.lastRegisterResult) ||
-                    describesLocalStackFailure(line.lastSdkReason)
-                ) {
-                    StatusLine(
-                        "Network",
-                        "This SDK registers on Wi-Fi. It has no IPv6 option, so this cellular network cannot register.",
-                    )
-                }
-                StatusLine(
-                    "Last call",
-                    if (line.lastCallAt == null) line.lastCallResult else "${line.lastCallResult} · ${stamp(context, line.lastCallAt)}",
-                )
-                StatusLine(
-                    "Last refresh",
-                    listOfNotNull(line.lastRefreshReason, stamp(context, line.lastRefreshAt).takeIf { line.lastRefreshAt != null })
-                        .joinToString(" · ").ifBlank { "none" },
-                )
-                StatusLine("Last invite", stamp(context, line.lastInviteAt))
-                StatusLine("Invite from", line.lastInviteFrom ?: "none yet")
-                StatusLine("Invite Call-ID", line.lastInviteCallId ?: "—")
-                StatusLine("Notifications", if (notifications) "allowed" else "denied")
-                StatusLine("Full-screen alerts", if (fullScreen) "allowed" else "denied")
-                StatusLine("Battery", if (battery) "unrestricted" else "optimized")
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-        dismissButton = {
-            Row {
-                if (!notifications) TextButton(onClick = {
-                    runCatching {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-                }) { Text("Notifications") }
-                if (!fullScreen && Build.VERSION.SDK_INT >= 34) TextButton(onClick = {
-                    runCatching {
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-                                Uri.parse("package:${context.packageName}"),
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-                }) { Text("Full screen") }
-                if (!battery) TextButton(onClick = {
-                    runCatching {
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                Uri.parse("package:${context.packageName}"),
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-                }) { Text("Battery") }
-            }
-        },
-    )
-}
-
-@Composable
-private fun StatusLine(label: String, value: String) {
-    Column {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyMedium)
+private fun PhoneOff(onTurnOn: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "Phone is off",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Incoming calls are stopped. Turn the phone on to register again.",
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onTurnOn) { Text("Turn On") }
     }
 }
-
-private fun registrationLabel(line: LineStatus): String = when (line.registration) {
-    Registration.ONLINE -> "Ready"
-    Registration.CONNECTING -> "Connecting"
-    Registration.FAILED -> "Failed, retrying"
-    Registration.OFFLINE -> "Offline"
-}
-
-private fun failureLabel(result: String): String = when {
-    describesLocalStackFailure(result) -> "This network can't register"
-    result == "timeout" || result.startsWith("timeout") -> "Timed out, retrying"
-    result.startsWith("failed:") -> {
-        val reason = result.removePrefix("failed:").substringBefore(" (").take(28)
-        if (reason.isBlank() || reason == "no-reason") "Failed, retrying" else "Failed ($reason), retrying"
-    }
-    else -> "Failed, retrying"
-}
-
-private fun ago(at: Long?): String {
-    if (at == null) return "none"
-    return DateUtils.getRelativeTimeSpanString(
-        at, System.currentTimeMillis(), DateUtils.SECOND_IN_MILLIS,
-    ).toString()
-}
-
-private fun stamp(context: android.content.Context, at: Long?): String {
-    if (at == null) return "none"
-    val clock = DateUtils.formatDateTime(
-        context,
-        at,
-        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_ALL,
-    )
-    return "$clock · ${ago(at)}"
-}
-
-private val KEYS = listOf(
-    '1' to "", '2' to "ABC", '3' to "DEF",
-    '4' to "GHI", '5' to "JKL", '6' to "MNO",
-    '7' to "PQRS", '8' to "TUV", '9' to "WXYZ",
-    '*' to "", '0' to "+", '#' to "",
-)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun Keypad(onDial: (String) -> Unit) {
+private fun Keypad(engine: SipEngine, onDial: (String) -> Unit) {
     var number by remember { mutableStateOf("") }
-    val line by PhoneManager.lineStatus.collectAsState()
+    val reg by engine.registration.collectAsState()
     Column(
         Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -331,9 +259,11 @@ private fun Keypad(onDial: (String) -> Unit) {
         KEYS.chunked(3).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 row.forEach { (digit, letters) ->
-                    DialKey(digit, letters,
+                    DialKey(
+                        digit, letters,
                         onClick = { number += digit },
-                        onLongClick = if (digit == '0') ({ number += '+' }) else null)
+                        onLongClick = if (digit == '0') ({ number += '+' }) else null,
+                    )
                 }
             }
         }
@@ -341,8 +271,7 @@ private fun Keypad(onDial: (String) -> Unit) {
             Spacer(Modifier.size(64.dp))
             RoundButton(
                 R.drawable.ic_call, LocalCallColors.current.accept, size = 72,
-                enabled = number.isNotEmpty() &&
-                    (line.registration == Registration.ONLINE || line.sdkRegistered),
+                enabled = number.isNotEmpty() && reg == Registration.ONLINE,
             ) { onDial(number) }
             Box(
                 Modifier.size(64.dp).clip(CircleShape)
@@ -355,50 +284,6 @@ private fun Keypad(onDial: (String) -> Unit) {
                 )
             }
         }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun DialKey(digit: Char, letters: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
-    Box(
-        Modifier
-            .size(76.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surface)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(digit.toString(), fontSize = 28.sp, color = MaterialTheme.colorScheme.onSurface)
-            if (letters.isNotEmpty()) Text(
-                letters, fontSize = 10.sp, letterSpacing = 1.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-fun RoundButton(
-    @DrawableRes icon: Int,
-    color: androidx.compose.ui.graphics.Color,
-    size: Int = 64,
-    enabled: Boolean = true,
-    contentDescription: String? = null,
-    tint: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.White,
-    onClick: () -> Unit,
-) {
-    Box(
-        Modifier
-            .size(size.dp)
-            .clip(CircleShape)
-            .background(if (enabled) color else color.copy(alpha = 0.35f))
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(painterResource(icon), contentDescription, tint = tint,
-            modifier = Modifier.size((size * 0.42f).dp))
     }
 }
 
@@ -422,9 +307,9 @@ private fun SpeedDials(config: ProvisionConfig, onDial: (String) -> Unit) {
 }
 
 @Composable
-private fun Recents(config: ProvisionConfig, onDial: (String) -> Unit) {
+private fun Recents(engine: SipEngine, config: ProvisionConfig, onDial: (String) -> Unit) {
     val records by CallHistory.records.collectAsState()
-    val names = remember(config) { config.speedDials.associate { PhoneManager.normalize(it.number) to it.label } }
+    val names = remember(config) { config.speedDials.associate { engine.normalize(it.number) to it.label } }
     if (records.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No calls yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -433,7 +318,7 @@ private fun Recents(config: ProvisionConfig, onDial: (String) -> Unit) {
     }
     LazyColumn(Modifier.fillMaxSize()) {
         items(records, key = { it.id }) { r ->
-            val name = names[PhoneManager.normalize(r.number)]
+            val name = names[engine.normalize(r.number)]
             val canCall = config.allowFreeDial || name != null
             RecentRow(r, name, enabled = canCall) { onDial(r.number) }
             HorizontalDivider(color = MaterialTheme.colorScheme.surface)
@@ -474,10 +359,13 @@ private fun RecentRow(r: CallRecord, name: String?, enabled: Boolean, onCall: ()
 }
 
 @Composable
-private fun ResetDialog(config: ProvisionConfig, onDismiss: () -> Unit) {
+private fun ResetDialog(config: ProvisionConfig, engine: SipEngine, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var pin by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
+    var manualUser by remember { mutableStateOf("") }
+    var manualPass by remember { mutableStateOf("") }
+    val unlocked = config.adminPin == null || pin == config.adminPin
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Reset this phone?") },
@@ -493,17 +381,46 @@ private fun ResetDialog(config: ProvisionConfig, onDismiss: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                 )
+                if (unlocked) {
+                    Text("Manual SIP login is a fallback. Leave it blank to keep using the QR line.")
+                    OutlinedTextField(
+                        value = manualUser, onValueChange = { manualUser = it },
+                        label = { Text("SIP username") }, singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = manualPass, onValueChange = { manualPass = it },
+                        label = { Text("SIP password") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    if (ConfigStore.manualCreds() != null) {
+                        TextButton(onClick = {
+                            ConfigStore.clearManual()
+                            val creds = ConfigStore.resolvedCreds()
+                            if (creds != null) engine.login(creds.first, creds.second)
+                            onDismiss()
+                        }) { Text("Use QR credentials again") }
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                if (config.adminPin == null || pin == config.adminPin) {
-                    onDismiss()
-                    PhoneService.deprovision(context)
-                } else {
-                    wrong = true
+            Row {
+                if (unlocked && manualUser.isNotBlank() && manualPass.isNotEmpty()) {
+                    TextButton(onClick = {
+                        ConfigStore.setManual(manualUser, manualPass)
+                        engine.login(manualUser.trim(), manualPass)
+                        onDismiss()
+                    }) { Text("Use manual") }
                 }
-            }) { Text("Reset", color = LocalCallColors.current.decline) }
+                TextButton(onClick = {
+                    if (unlocked) {
+                        onDismiss()
+                        PhoneService.deprovision(context)
+                    } else {
+                        wrong = true
+                    }
+                }) { Text("Reset", color = LocalCallColors.current.decline) }
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

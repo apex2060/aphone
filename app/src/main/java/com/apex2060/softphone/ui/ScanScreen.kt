@@ -10,7 +10,6 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -39,15 +37,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import com.apex2060.softphone.R
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.Provisioner
 import com.google.zxing.BarcodeFormat
@@ -66,7 +61,7 @@ private sealed interface ScanState {
     data class Error(val message: String) : ScanState
 }
 
-/** The only screen an unprovisioned phone shows. */
+/** The only screen until a Comm Manager QR has been accepted. */
 @Composable
 fun ScanScreen() {
     val context = LocalContext.current
@@ -78,7 +73,6 @@ fun ScanScreen() {
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCamera = it }
     LaunchedEffect(Unit) { if (!hasCamera) permission.launch(Manifest.permission.CAMERA) }
-
     var state by remember { mutableStateOf<ScanState>(ScanState.Scanning) }
 
     fun onCode(text: String) {
@@ -104,9 +98,7 @@ fun ScanScreen() {
         if (hasCamera && state == ScanState.Scanning) {
             QrCamera(onCode = ::onCode)
             Box(
-                Modifier
-                    .align(Alignment.Center)
-                    .size(260.dp)
+                Modifier.align(Alignment.Center).size(260.dp)
                     .border(3.dp, Color.White.copy(alpha = 0.85f), RoundedCornerShape(24.dp))
             )
         }
@@ -132,19 +124,15 @@ fun ScanScreen() {
             if (!hasCamera) Button(onClick = { permission.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
         }
         Surface(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 12.dp),
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 12.dp),
             shape = RoundedCornerShape(16.dp),
             color = Color.White,
-            shadowElevation = 6.dp,
         ) {
-            Image(
-                painter = painterResource(R.drawable.logo_22phone),
-                contentDescription = "22 Phone",
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).height(104.dp),
-                contentScale = ContentScale.Fit,
+            Text(
+                "22 Phone",
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.Black,
             )
         }
     }
@@ -157,7 +145,6 @@ private fun QrCamera(onCode: (String) -> Unit) {
     val executor = remember { Executors.newSingleThreadExecutor() }
     val previewView = remember { PreviewView(context) }
     val main = ContextCompat.getMainExecutor(context)
-
     DisposableEffect(Unit) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         val fired = AtomicBoolean(false)
@@ -194,10 +181,8 @@ private class QrAnalyzer(private val onResult: (String) -> Unit) : ImageAnalysis
             val source = PlanarYUVLuminanceSource(
                 bytes, plane.rowStride, image.height, 0, 0, image.width, image.height, false
             )
-            val result = reader.decodeWithState(BinaryBitmap(HybridBinarizer(source)))
-            onResult(result.text)
+            onResult(reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text)
         } catch (_: Exception) {
-            // No code in this frame.
         } finally {
             reader.reset()
             image.close()

@@ -4,12 +4,10 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
-import android.view.WindowManager
 import android.text.format.DateUtils
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -37,13 +35,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
+import com.apex2060.softphone.CallPhase
+import com.apex2060.softphone.CallUi
 import com.apex2060.softphone.R
+import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.ProvisionConfig
-import com.apex2060.softphone.phone.CallPhase
-import com.apex2060.softphone.phone.CallState
-import com.apex2060.softphone.phone.PhoneManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Incoming-call and in-call screen. Shows over the lock screen and finishes when the call is gone. */
 class CallActivity : ComponentActivity() {
@@ -54,46 +54,43 @@ class CallActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        handleAnswer(intent)
-
-        // Driven from the lifecycle rather than composition: Compose stops recomposing while the screen is
-        // off (proximity sensor, lock screen), which used to leave this screen and its timer up after hangup.
+        val engine = (application as SoftphoneApp).engine
+        handleAnswer(intent, engine)
         lifecycleScope.launch {
-            PhoneManager.call.collect { call ->
+            engine.call.collect { call ->
                 updateProximity(call)
                 if (call == null || call.phase == CallPhase.ENDED) finish()
             }
         }
-
         setContent {
-            val call by PhoneManager.call.collectAsState()
+            val call by engine.call.collectAsState()
             val config by ConfigStore.config.collectAsState()
             val current = call
             SoftphoneTheme(config?.theme ?: ProvisionConfig.DEFAULT_THEME) {
-                if (current != null) CallScreen(current, config?.speedDials.orEmpty()
-                    .associate { PhoneManager.normalize(it.number) to it.label }[current.number])
+                if (current != null && current.phase != CallPhase.ENDED) {
+                    val names = config?.speedDials.orEmpty().associate { engine.normalize(it.number) to it.label }
+                    CallScreen(engine, current, names[current.number])
+                }
             }
         }
     }
 
     override fun onStart() {
         super.onStart()
-        PhoneManager.onActivityStarted()
+        (application as SoftphoneApp).engine.onActivityStarted()
+    }
+
+    override fun onStop() {
+        (application as SoftphoneApp).engine.onActivityStopped()
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleAnswer(intent)
-    }
-
-    override fun onStop() {
-        PhoneManager.onActivityStopped()
-        super.onStop()
+        setIntent(intent)
+        handleAnswer(intent, (application as SoftphoneApp).engine)
     }
 
     override fun onDestroy() {
@@ -101,16 +98,15 @@ class CallActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun handleAnswer(intent: Intent?) {
-        if (intent?.getBooleanExtra(EXTRA_ANSWER, false) == true) PhoneManager.answer()
+    private fun handleAnswer(intent: Intent?, engine: com.apex2060.softphone.SipEngine) {
+        if (intent?.getBooleanExtra(EXTRA_ANSWER, false) == true) engine.answer()
     }
 
-    /** Blank the screen against the user's ear during a handset call. */
-    private fun updateProximity(call: CallState?) {
+    private fun updateProximity(call: CallUi?) {
         val want = call != null && call.phase != CallPhase.RINGING_IN && call.phase != CallPhase.ENDED && !call.speaker
         val pm = getSystemService(PowerManager::class.java)
         if (proximity == null && pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
-            proximity = pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "softphone:proximity")
+            proximity = pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "sipspike:proximity")
         }
         val lock = proximity ?: return
         if (want && !lock.isHeld) lock.acquire(4 * 60 * 60_000L)
@@ -123,11 +119,10 @@ class CallActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CallScreen(call: CallState, name: String?) {
+private fun CallScreen(engine: com.apex2060.softphone.SipEngine, call: CallUi, name: String?) {
     val colors = LocalCallColors.current
     var showKeypad by remember { mutableStateOf(false) }
     var dtmf by remember { mutableStateOf("") }
-
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(call.answeredAt) {
         while (call.answeredAt != null) {
@@ -142,32 +137,22 @@ private fun CallScreen(call: CallState, name: String?) {
         CallPhase.ACTIVE -> call.answeredAt?.let { DateUtils.formatElapsedTime((now - it) / 1000) } ?: "Connected"
         CallPhase.ENDED -> call.endedLabel ?: "Call ended"
     }
-
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(48.dp))
-            Text(
-                name ?: call.number, fontSize = 32.sp, textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
+            Text(name ?: call.number, fontSize = 32.sp, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onBackground)
             if (name != null) Text(call.number, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
             Text(status, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (dtmf.isNotEmpty()) Text(dtmf, fontSize = 24.sp, color = MaterialTheme.colorScheme.onBackground)
-
             Spacer(Modifier.weight(1f))
-
             when (call.phase) {
                 CallPhase.RINGING_IN -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    RoundButton(R.drawable.ic_call_end, colors.decline, size = 76, contentDescription = "Decline") {
-                        PhoneManager.decline()
-                    }
-                    RoundButton(R.drawable.ic_call, colors.accept, size = 76, contentDescription = "Answer") {
-                        PhoneManager.answer()
-                    }
+                    RoundButton(R.drawable.ic_call_end, colors.decline, size = 76, contentDescription = "Decline") { engine.decline() }
+                    RoundButton(R.drawable.ic_call, colors.accept, size = 76, contentDescription = "Answer") { engine.answer() }
                 }
                 CallPhase.ENDED -> Unit
                 else -> {
@@ -176,7 +161,7 @@ private fun CallScreen(call: CallState, name: String?) {
                             listOf("123", "456", "789", "*0#").forEach { row ->
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                                     row.forEach { d ->
-                                        DialKey(d, "", onClick = { dtmf += d; PhoneManager.sendDigit(d) })
+                                        DialKey(d, "", onClick = { dtmf += d; engine.sendDigit(d) })
                                     }
                                 }
                             }
@@ -186,22 +171,22 @@ private fun CallScreen(call: CallState, name: String?) {
                     val idle = MaterialTheme.colorScheme.surface
                     val on = MaterialTheme.colorScheme.primary
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        RoundButton(R.drawable.ic_mic_off, if (call.muted) on else idle, contentDescription = "Mute",
-                            tint = if (call.muted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface) {
-                            PhoneManager.toggleMute()
-                        }
-                        RoundButton(R.drawable.ic_dialpad, if (showKeypad) on else idle, contentDescription = "Keypad",
-                            tint = if (showKeypad) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface) {
-                            showKeypad = !showKeypad
-                        }
-                        RoundButton(R.drawable.ic_volume_up, if (call.speaker) on else idle, contentDescription = "Speaker",
-                            tint = if (call.speaker) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface) {
-                            PhoneManager.toggleSpeaker()
-                        }
+                        RoundButton(
+                            R.drawable.ic_mic_off, if (call.muted) on else idle, contentDescription = "Mute",
+                            tint = if (call.muted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                        ) { engine.toggleMute() }
+                        RoundButton(
+                            R.drawable.ic_dialpad, if (showKeypad) on else idle, contentDescription = "Keypad",
+                            tint = if (showKeypad) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                        ) { showKeypad = !showKeypad }
+                        RoundButton(
+                            R.drawable.ic_volume_up, if (call.speaker) on else idle, contentDescription = "Speaker",
+                            tint = if (call.speaker) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                        ) { engine.toggleSpeaker() }
                     }
                     Spacer(Modifier.height(32.dp))
                     RoundButton(R.drawable.ic_call_end, colors.decline, size = 76, contentDescription = "Hang up") {
-                        PhoneManager.hangup()
+                        engine.hangup()
                     }
                 }
             }

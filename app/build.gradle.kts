@@ -12,8 +12,8 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.0.0"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 1
+    ?: "1.1.0"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 15
 
 android {
     namespace = "com.apex2060.softphone"
@@ -25,8 +25,8 @@ android {
         targetSdk = 35
         versionCode = releaseVersionCode
         versionName = releaseVersionName
-        // Phones only: dropping x86 builds of the WebRTC libs roughly halves the APK.
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        // PJSIP is built for arm64. v1.0.5 also shipped armeabi-v7a via the Plivo SDK.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     val keystorePath = System.getenv("ANDROID_KEYSTORE_FILE")
@@ -51,8 +51,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // R8 renaming breaks pjsua2's SWIG callbacks. The signing config is unchanged.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Never fall back to the debug key. checkReleaseSigning fails the build when
             // the stable keystore is missing, so an unsigned APK is not produced either.
@@ -70,6 +71,20 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    sourceSets {
+        getByName("main") {
+            java.srcDir("../sipspike/src/main/java/org")
+            assets.srcDir("../sipspike/src/main/assets")
+            jniLibs.srcDir("../sipspike/src/main/jniLibs")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
@@ -113,8 +128,6 @@ kotlin {
 }
 
 dependencies {
-    implementation("com.plivo.endpoint:endpoint:3.2.2-beta")
-
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.activity:activity-compose:1.10.1")
@@ -132,4 +145,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.zxing:core:3.5.3")
+
+    testImplementation("junit:junit:4.13.2")
 }

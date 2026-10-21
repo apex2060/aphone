@@ -1,13 +1,15 @@
 # 22 Phone
 
-An Android phone app for Plivo. A fresh install shows nothing but a QR scanner. Scan a
-setup code and the phone pulls its SIP credentials, title and colors from your server, registers
-with Plivo, and becomes a dialer that makes calls, rings for incoming calls, and keeps a call history.
+An Android phone app. A fresh install shows nothing but a QR scanner. Scan a
+setup code and the phone pulls its SIP credentials, title and colors from your server, registers,
+and becomes a dialer that makes calls, rings for incoming calls, and keeps a call history.
 
 * **Provisioning:** QR code with a URL and key, then a JSON document from your server. See
   [docs/PROVISIONING.md](docs/PROVISIONING.md) for the schema and [server/](server/) for a
   zero-dependency sample endpoint.
-* **Calling:** Plivo Android SDK (`com.plivo.endpoint:endpoint`) logged in with endpoint credentials.
+* **Calling:** PJSIP 2.17 (`libpjsua2`), the same registration and call plan as 22 SIP Test 0.5.
+  The Plivo Android SDK is not part of this app. Credentials are still the endpoint username
+  and password from the provisioning document.
 * **Incoming calls:** a foreground service keeps the registration open, posts a full-screen
   ringing notification with Answer and Decline, and logs missed calls.
 * **History:** a local SQLite log of incoming, outgoing, missed and declined calls, with tap to call back.
@@ -107,8 +109,8 @@ debug-signed build. Uninstall that copy once. Later tags install over this one.
 ```
 app/src/main/java/com/apex2060/softphone/
   config/   ProvisionConfig (schema), Provisioner (QR + HTTP), ConfigStore (persistence)
-  phone/    PhoneManager (Plivo endpoint + call state), PhoneService (foreground service),
-            Notifications, BootReceiver
+  phone/    PhoneService (foreground service), Notifications, BootReceiver
+  SipEngine.kt and the classes next to it  PJSIP registration, calls, and the on/off switch
   history/  CallHistory (SQLite)
   ui/       MainActivity, ScanScreen, HomeScreen (keypad, contacts, recents), CallActivity, Theme
 server/     sample provisioning endpoint
@@ -118,6 +120,6 @@ docs/       provisioning schema
 ## Known limits
 
 * Incoming calls depend on the foreground service staying connected. That is reliable with the
-  battery exemption, but a Firebase push setup (Plivo supports it) would be more robust on
-  aggressive OEM battery managers.
+  battery exemption. Push wake-up is not in this build.
+* The native library is arm64-v8a only.
 * One call at a time. A second incoming call while busy is rejected and logged as missed.

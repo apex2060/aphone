@@ -7,6 +7,6 @@ import com.apex2060.softphone.config.ConfigStore
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (ConfigStore.config.value != null) PhoneService.start(context)
+        if (ConfigStore.config.value != null && ConfigStore.phoneEnabled.value) PhoneService.start(context)
     }
 }

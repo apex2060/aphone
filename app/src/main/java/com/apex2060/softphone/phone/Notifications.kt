@@ -10,9 +10,12 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import androidx.core.app.Person
+import androidx.core.content.ContextCompat
+import com.apex2060.softphone.CallPhase
+import com.apex2060.softphone.CallUi
 import com.apex2060.softphone.R
+import com.apex2060.softphone.Registration
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.ui.CallActivity
 import com.apex2060.softphone.ui.MainActivity
@@ -23,34 +26,30 @@ object Notifications {
     const val ID_MISSED = 3
 
     private const val CH_STATUS = "status"
-    /** New id: an existing "incoming" channel keeps its old sound and cannot be changed in place. */
     private const val CH_INCOMING = "incoming_v2"
     private const val CH_MISSED = "missed"
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
+        nm.deleteNotificationChannel("incoming")
         nm.createNotificationChannel(
-            NotificationChannel(CH_STATUS, context.getString(R.string.notif_channel_status), NotificationManager.IMPORTANCE_LOW).apply {
+            NotificationChannel(CH_STATUS, "22 Phone", NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false)
             }
         )
-        // Sound and vibration are played by PhoneService. A sounding channel would ring twice.
-        nm.deleteNotificationChannel("incoming")
         nm.createNotificationChannel(
-            NotificationChannel(CH_INCOMING, context.getString(R.string.notif_channel_incoming), NotificationManager.IMPORTANCE_HIGH).apply {
+            NotificationChannel(CH_INCOMING, "Incoming calls", NotificationManager.IMPORTANCE_HIGH).apply {
                 setSound(null, null)
                 enableVibration(false)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
         )
         nm.createNotificationChannel(
-            NotificationChannel(CH_MISSED, context.getString(R.string.notif_channel_missed), NotificationManager.IMPORTANCE_DEFAULT)
+            NotificationChannel(CH_MISSED, "Missed calls", NotificationManager.IMPORTANCE_DEFAULT)
         )
     }
 
-    /** Line name from provisioning, or the app name before a document arrives. */
-    private fun title(context: Context) =
-        ConfigStore.config.value?.title ?: context.getString(R.string.app_name)
+    private fun title() = ConfigStore.config.value?.title ?: "22 Phone"
 
     private fun openApp(context: Context) = PendingIntent.getActivity(
         context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
@@ -71,13 +70,12 @@ object Notifications {
         PendingIntent.FLAG_IMMUTABLE
     )
 
-    /** The persistent foreground-service notification; doubles as the ongoing-call notification. */
-    fun status(context: Context, reg: Registration, call: CallState?): Notification {
+    fun status(context: Context, reg: Registration, call: CallUi?): Notification {
         val b = NotificationCompat.Builder(context, CH_STATUS)
             .setSmallIcon(R.drawable.ic_call)
             .setOngoing(true)
             .setShowWhen(false)
-            .setContentTitle(title(context))
+            .setContentTitle(title())
             .setContentIntent(openApp(context))
         if (call != null && call.phase != CallPhase.RINGING_IN && call.phase != CallPhase.ENDED) {
             val person = Person.Builder().setName(call.number).build()
@@ -90,7 +88,7 @@ object Notifications {
                 when (reg) {
                     Registration.ONLINE -> "Ready for calls"
                     Registration.CONNECTING -> "Connecting…"
-                    Registration.FAILED -> "Can't reach Plivo, retrying"
+                    Registration.FAILED -> "Can't reach the server, retrying"
                     Registration.OFFLINE -> "Offline"
                 }
             )
@@ -103,7 +101,7 @@ object Notifications {
         return NotificationCompat.Builder(context, CH_INCOMING)
             .setSmallIcon(R.drawable.ic_call)
             .setContentTitle(number)
-            .setContentText("Incoming call · ${title(context)}")
+            .setContentText("Incoming call · ${title()}")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
@@ -120,21 +118,6 @@ object Notifications {
             .apply { flags = flags or Notification.FLAG_INSISTENT }
     }
 
-    fun notificationsAllowed(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < 33) return true
-        return ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-
-    /** Android 14+ sideload installs do not grant this until the user allows it in settings. */
-    fun canUseFullScreenIntent(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < 34) return true
-        return context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
-    }
-
-    fun batteryUnrestricted(context: Context): Boolean =
-        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
-
     fun missed(context: Context, number: String): Notification =
         NotificationCompat.Builder(context, CH_MISSED)
             .setSmallIcon(R.drawable.ic_call)
@@ -144,4 +127,18 @@ object Notifications {
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
             .build()
+
+    fun notificationsAllowed(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 33) return true
+        return ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    fun canUseFullScreenIntent(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 34) return true
+        return context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+    }
+
+    fun batteryUnrestricted(context: Context): Boolean =
+        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
 }

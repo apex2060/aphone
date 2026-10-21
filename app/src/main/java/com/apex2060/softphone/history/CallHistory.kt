@@ -47,6 +47,7 @@ object CallHistory {
 
     @Synchronized
     fun clear() {
+        if (!::db.isInitialized) return
         db.writableDatabase.delete(TABLE, null, null)
         reload()
     }
