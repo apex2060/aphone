@@ -1,24 +1,32 @@
 package com.twentytwo.phone.sipspike
 
 /**
- * Strips SIP credentials from text before it is shown, shared, or written to logcat.
- * The digest response is not the password, and it still does not belong in a shared log.
+ * Strips SIP credentials, the provisioning key, and token-like fields before
+ * text is shown, shared, written to the log file, or written to logcat.
  */
 object LogSanitizer {
     private val authHeader = Regex("(?i)(Proxy-)?Authorization\\s*:[^\\r\\n]*")
+    private val provisionHeader = Regex("(?i)(X-Provision-Key|X-Api-Key)\\s*:[^\\r\\n]*")
+    private val querySecret = Regex("(?i)([?&](?:key|token|secret|password)=)[^&\\s]*")
+    private val jsonSecret = Regex(
+        """(?i)"(password|pass|key|token|secret|authorization|access_token|refresh_token|fcm|fcmToken|provision_key|provisionKey)"\s*:\s*"(?:\\.|[^"\\])*""""
+    )
 
-    fun redact(message: String, secret: String?): String {
+    fun redact(message: String, secrets: Collection<String?> = emptyList()): String {
         var out = authHeader.replace(message) { match ->
-            val proxy = if (match.value.startsWith("Proxy", ignoreCase = true) ||
-                match.value.startsWith("proxy")
-            ) {
-                "Proxy-"
-            } else {
-                ""
-            }
+            val proxy = if (match.value.startsWith("Proxy", ignoreCase = true)) "Proxy-" else ""
             "${proxy}Authorization: [redacted]"
         }
-        if (!secret.isNullOrEmpty()) {
+        out = provisionHeader.replace(out) { "${it.groupValues[1]}: [redacted]" }
+        out = querySecret.replace(out) { "${it.groupValues[1]}[redacted]" }
+        out = jsonSecret.replace(out) { "\"${it.groupValues[1]}\":\"[redacted]\"" }
+        val literals = secrets
+            .filterNot { it.isNullOrEmpty() }
+            .map { it!! }
+            .distinct()
+            .sortedByDescending { it.length }
+        for (secret in literals) {
+            if (secret.length < 3) continue
             out = out.replace(secret, "[redacted]")
         }
         return out
