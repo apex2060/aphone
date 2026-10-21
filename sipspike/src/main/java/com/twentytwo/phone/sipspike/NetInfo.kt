@@ -12,6 +12,8 @@ data class NetSnapshot(
     val summary: String,
     val detail: String,
     val hasIpv4: Boolean,
+    /** Routable addresses, excluding loopback and IPv6 link-local. Sorted by the caller. */
+    val addresses: List<String>,
 )
 
 object NetInfo {
@@ -19,7 +21,7 @@ object NetInfo {
         val cm = context.getSystemService(ConnectivityManager::class.java)
         val network = cm.activeNetwork
         if (network == null) {
-            return NetSnapshot("none", "network: none (no active network)", false)
+            return NetSnapshot("none", "network: none (no active network)", false, emptyList())
         }
         val caps = cm.getNetworkCapabilities(network)
         val link = cm.getLinkProperties(network)
@@ -34,6 +36,7 @@ object NetInfo {
         var hasIpv4 = false
         var hasIpv6 = false
         var hasClat = false
+        val addresses = mutableListOf<String>()
         val addrs = link?.linkAddresses.orEmpty()
         if (addrs.isEmpty()) {
             lines += "addresses: (none)"
@@ -44,6 +47,10 @@ object NetInfo {
             if (label == "ipv4" || label == "clat") hasIpv4 = true
             if (label == "ipv6") hasIpv6 = true
             if (label == "clat") hasClat = true
+            val host = addr.hostAddress?.substringBefore('%').orEmpty()
+            if (label != "loopback" && label != "ipv6-link" && host.isNotEmpty()) {
+                addresses += "$label $host"
+            }
             lines += "addr $label ${addr.hostAddress} prefix=${la.prefixLength}"
         }
         val dns = link?.dnsServers.orEmpty().joinToString { it.hostAddress ?: "?" }
@@ -56,7 +63,7 @@ object NetInfo {
             if (hasIpv6) append("ipv6 ")
             if (!hasIpv4 && !hasIpv6) append("no-addr ")
         }.trim()
-        return NetSnapshot(summary, lines.joinToString("\n"), hasIpv4)
+        return NetSnapshot(summary, lines.joinToString("\n"), hasIpv4, addresses.sorted())
     }
 
     private fun transports(caps: NetworkCapabilities?): String {

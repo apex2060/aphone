@@ -38,4 +38,8 @@ object TransportPlan {
         val first = remembered?.takeIf { it in chain }
         return (listOfNotNull(first) + chain).distinct()
     }
+
+    /** Type plus routable addresses. Capabilities callbacks compare this. */
+    fun networkKey(signature: String, addresses: List<String>): String =
+        signature + "|" + addresses.map { it.trim() }.filter { it.isNotEmpty() }.sorted().joinToString(",")
 }

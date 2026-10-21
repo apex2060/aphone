@@ -43,4 +43,25 @@ class TransportPlanTest {
             TransportPlan.attempts(sig, TransportMode.UDP, TransportMode.TLS_IPV6),
         )
     }
+
+    @Test
+    fun networkKeyIgnoresAddressOrderAndChangesWhenAnAddressChanges() {
+        val a = TransportPlan.networkKey("cellular", listOf("ipv6 2600:1011::1", "ipv4 100.90.40.193"))
+        val b = TransportPlan.networkKey("cellular", listOf("ipv4 100.90.40.193", "ipv6 2600:1011::1"))
+        val c = TransportPlan.networkKey("cellular", listOf("ipv4 100.90.40.194", "ipv6 2600:1011::1"))
+        assertEquals(a, b)
+        assertEquals("cellular|ipv4 100.90.40.193,ipv6 2600:1011::1", a)
+        assert(a != c)
+    }
+}
+
+class CodecPlanTest {
+    @Test
+    fun fullCodecIdsKeepG711AndDisableAmr() {
+        assertEquals(255, CodecPlan.priority("PCMU/8000/1"))
+        assertEquals(200, CodecPlan.priority("PCMA/8000/1"))
+        assertEquals(128, CodecPlan.priority("telephone-event/8000/1"))
+        assertEquals(0, CodecPlan.priority("AMR/8000/1"))
+        assertEquals(0, CodecPlan.priority("AMR-WB/16000/1"))
+    }
 }

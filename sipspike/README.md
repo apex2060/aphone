@@ -20,9 +20,14 @@ Transport is automatic:
 3. Then UDP `phone.plivo.com:5060`
 
 The transport that succeeds is remembered per network type (wifi, cellular,
-cellular with no IPv4). Details has a manual override. A network change
-re-registers. Codecs are PCMU, PCMA, and RFC 2833. SRTP is off. Hangup sends
-BYE or CANCEL before the local call is cleared.
+cellular with no IPv4). Details has a manual override. A change of network
+type or routable addresses re-registers. A resume or a capabilities callback
+that leaves those the same does not. Codecs offered are PCMU then PCMA
+(`PCMU/8000/1`, `PCMA/8000/1`). AMR and the other MediaCodec entries are
+priority 0. `telephone-event/8000` payload type 120 is added by pjmedia with
+the 8 kHz codecs; it is not a separate codec-list entry. SRTP is off. G.711
+VAD is off so silence still sends RTP behind CGNAT. Hangup sends BYE or
+CANCEL before the local call is cleared.
 
 The log is timestamped, stored in a rotating file capped around 2 MB, and
 shown in Details with Share and Copy. It records provisioning (password,

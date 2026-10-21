@@ -125,6 +125,7 @@ class SipEngine(private val app: Application) {
     private var lastRtpIn = -1L
     private var lastRtpOut = -1L
     private var pendingNet = "change"
+    private var seenNetKey = ""
 
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = scheduleNet("available")
@@ -207,6 +208,11 @@ class SipEngine(private val app: Application) {
     fun refreshRegistration(reason: String) {
         pjsip.post {
             if (!wantRegister) return@post
+            val key = netKey(NetInfo.snapshot(app))
+            if (reason != "timer" && registeredOk && ep != null && key == seenNetKey) {
+                SpikeLog.append("refresh $reason skipped, network unchanged ($key)")
+                return@post
+            }
             SpikeLog.append("refresh $reason")
             if (registeredOk && ep != null) {
                 try {
@@ -365,6 +371,7 @@ class SipEngine(private val app: Application) {
         logDns("phone.plivo.com")
         logDns("mobile.phone.plivo.com")
         planSig = TransportPlan.signature(net.summary, net.hasIpv4)
+        seenNetKey = TransportPlan.networkKey(planSig, net.addresses)
         planHasIpv4 = net.hasIpv4
         val remembered = ConfigStore.winner(planSig)
         val override = ConfigStore.transportOverride()
@@ -434,7 +441,10 @@ class SipEngine(private val app: Application) {
         cfg.logConfig.consoleLevel = 5
         cfg.logConfig.writer = writer
         writer.swigReleaseOwnership()
-        cfg.uaConfig.userAgent = "22SIPTest/0.2"
+        cfg.uaConfig.userAgent = "22SIPTest/${BuildConfig.VERSION_NAME}"
+        // Default is already 1. Without a STUN server this never learns a NAT type,
+        // so it does not add a useful a=X-nat line. Contact and SDP rewrite do the work.
+        cfg.uaConfig.natTypeInSdp = 1
         cfg.medConfig.clockRate = 16000
         cfg.medConfig.sndClockRate = 16000
         endpoint.libInit(cfg)
@@ -465,7 +475,10 @@ class SipEngine(private val app: Application) {
             TransportMode.TLS_IPV6 -> pjsua_ipv6_use.PJSUA_IPV6_ENABLED_USE_IPV6_ONLY
             else -> pjsua_ipv6_use.PJSUA_IPV6_DISABLED
         }
-        SpikeLog.append("sip ipv6=$sipIpv6 media ipv6=$mediaIpv6 srtp=disabled ice=off")
+        SpikeLog.append(
+            "sip ipv6=$sipIpv6 (${ipv6Name(sipIpv6)}) media ipv6=$mediaIpv6 (${ipv6Name(mediaIpv6)}) " +
+                "srtp=disabled ice=off"
+        )
 
         val accCfg = AccountConfig()
         accCfg.idUri = "sip:$username@phone.plivo.com"
@@ -479,11 +492,27 @@ class SipEngine(private val app: Application) {
         accCfg.sipConfig.ipv6Use = sipIpv6
         accCfg.natConfig.iceEnabled = false
         accCfg.natConfig.contactRewriteUse = 1
+        // 2 = rewrite Contact without unregistering first, 4 = always update when Via changes.
+        // The extra REGISTER after a 401 (public address learned from Via) is this, and it
+        // is what makes the Contact reachable from behind CGNAT.
+        accCfg.natConfig.contactRewriteMethod = 2 or 4
         accCfg.natConfig.viaRewriteUse = 1
         accCfg.natConfig.sdpNatRewriteUse = 1
+        accCfg.natConfig.sipOutboundUse = 1
+        // Account keepalive is UDP-only unless the registrar returns Flow-Timer.
+        // TLS CRLF keepalive is the transport default (about 90s) and stays on.
+        accCfg.natConfig.udpKaIntervalSec = 15
         accCfg.mediaConfig.srtpUse = pjmedia_srtp_use.PJMEDIA_SRTP_DISABLED
         accCfg.mediaConfig.srtpSecureSignaling = 0
         accCfg.mediaConfig.ipv6Use = mediaIpv6
+        // This libpjsua2.so is built with PJMEDIA_STREAM_ENABLE_KA=0, so pjsua2
+        // drops the flag. VAD off on G.711 is what keeps RTP flowing in silence.
+        accCfg.mediaConfig.streamKaEnabled = true
+        SpikeLog.append(
+            "nat contactRewrite=1 method=6 viaRewrite=1 sdpNatRewrite=1 " +
+                "sipOutbound=1 udpKa=15s tlsKa=default natTypeInSdp=1 (no STUN, so no learned NAT type) " +
+                "streamKa=compiled-out vad=off"
+        )
         val acc = SpikeAccount(this)
         acc.create(accCfg, true)
         account = acc
@@ -584,23 +613,57 @@ class SipEngine(private val app: Application) {
 
     private fun tuneCodecs(endpoint: Endpoint) {
         val codecs = endpoint.codecEnum2()
+        val offered = mutableListOf<String>()
+        val disabled = mutableListOf<String>()
         var sawEvent = false
         for (i in 0 until codecs.size) {
-            val info = codecs.get(i)
-            val id = info.codecId
-            val priority = when {
-                id.equals("PCMU/8000", true) -> 255
-                id.equals("PCMA/8000", true) -> 200
-                id.startsWith("telephone-event/8000", true) -> {
-                    sawEvent = true
-                    128
-                }
-                else -> 0
-            }.toShort()
-            endpoint.codecSetPriority(id, priority)
-            if (priority > 0) SpikeLog.append("codec $id priority=$priority")
+            val id = codecs.get(i).codecId ?: continue
+            val priority = CodecPlan.priority(id)
+            if (priority == CodecPlan.TELEPHONE_EVENT) sawEvent = true
+            try {
+                endpoint.codecSetPriority(id, priority.toShort())
+            } catch (e: Exception) {
+                SpikeLog.append("codec $id priority failed: ${e.message}")
+                continue
+            }
+            if (priority > 0) {
+                val vad = disableVad(endpoint, id)
+                offered += id
+                SpikeLog.append("codec $id priority=$priority vad=$vad")
+            } else {
+                disabled += id
+                SpikeLog.append("codec $id priority=0 disabled")
+            }
         }
-        if (!sawEvent) SpikeLog.append("warning: telephone-event/8000 was not in the codec list")
+        if (!sawEvent) {
+            // Not a codec-manager entry. pjmedia_endpt_create_audio_sdp adds
+            // telephone-event/8000 at payload type 120 when an 8 kHz codec is offered.
+            SpikeLog.append(
+                "rfc2833 telephone-event/8000 pt=120 is added with PCMU/PCMA; " +
+                    "it is not in the codec list (id would be telephone-event/8000/1)"
+            )
+        }
+        SpikeLog.append(
+            "offered codecs ${offered.joinToString().ifBlank { "(none)" }}; " +
+                "disabled ${disabled.joinToString().ifBlank { "(none)" }}"
+        )
+    }
+
+    private fun disableVad(endpoint: Endpoint, id: String): String = try {
+        val param = endpoint.codecGetParam(id)
+        param.setting.vad = false
+        endpoint.codecSetParam(id, param)
+        "off"
+    } catch (e: Exception) {
+        "unchanged (${e.message})"
+    }
+
+    private fun ipv6Name(value: Int): String = when (value) {
+        pjsua_ipv6_use.PJSUA_IPV6_DISABLED -> "disabled"
+        pjsua_ipv6_use.PJSUA_IPV6_ENABLED_PREFER_IPV4 -> "prefer-ipv4"
+        pjsua_ipv6_use.PJSUA_IPV6_ENABLED_PREFER_IPV6 -> "prefer-ipv6"
+        pjsua_ipv6_use.PJSUA_IPV6_ENABLED_USE_IPV6_ONLY -> "ipv6-only"
+        else -> "no-preference"
     }
 
     private fun destroyStack() {
@@ -653,30 +716,40 @@ class SipEngine(private val app: Application) {
     private val netTick = Runnable {
         val reason = pendingNet
         val snap = NetInfo.snapshot(app)
-        val previous = _line.value.signature
         publishNet(snap)
         val sig = TransportPlan.signature(snap.summary, snap.hasIpv4)
+        val key = TransportPlan.networkKey(sig, snap.addresses)
+        if (key == seenNetKey) {
+            SpikeLog.append("network $reason unchanged ($key), skip re-register")
+            return@Runnable
+        }
+        val previous = seenNetKey
+        seenNetKey = key
         SpikeLog.append("network $reason\n${snap.detail}")
         if (!wantRegister) return@Runnable
         pjsip.post {
             when {
                 sig != planSig -> {
-                    SpikeLog.append("re-register after $reason signature $previous -> $sig")
+                    SpikeLog.append("re-register after $reason signature $previous -> $key")
                     beginChain()
                 }
                 registeredOk -> {
                     try {
                         ep?.handleIpChange(IpChangeParam())
                         account?.setRegistration(true)
-                        SpikeLog.append("re-register after $reason (${snap.summary})")
+                        SpikeLog.append("re-register after $reason ($key)")
                     } catch (e: Exception) {
                         SpikeLog.append("re-register failed: ${e.message}")
                     }
                 }
                 !attempting -> beginChain()
+                else -> SpikeLog.append("network $reason during attempt, not restarting")
             }
         }
     }
+
+    private fun netKey(snap: NetSnapshot): String =
+        TransportPlan.networkKey(TransportPlan.signature(snap.summary, snap.hasIpv4), snap.addresses)
 
     private fun onReg(code: Int, reason: String, expiration: Long, status: Int) {
         if (closing) return
@@ -737,6 +810,11 @@ class SipEngine(private val app: Application) {
         SpikeLog.append(
             "call ${info.stateText} code=${info.lastStatusCode} ${info.lastReason} ${info.remoteUri}"
         )
+        if (info.state != pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED &&
+            info.state != pjsip_inv_state.PJSIP_INV_STATE_NULL
+        ) {
+            logSdpDump(current)
+        }
         val ui = _call.value
         when (info.state) {
             pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED -> {
