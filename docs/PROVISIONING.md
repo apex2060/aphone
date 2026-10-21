@@ -1,7 +1,7 @@
 # Provisioning
 
 A fresh install shows only a QR scanner. Scanning a setup code makes the phone fetch a JSON
-document from your server, save it, register with Plivo, and switch to the dialer. The phone
+document from your server, save it, register its FCM token with Plivo, and switch to the dialer. The phone
 stays provisioned across reboots and app updates until it is reset or revoked.
 
 ## 1. The QR code

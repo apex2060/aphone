@@ -71,6 +71,17 @@ android {
         compose = true
         buildConfig = true
     }
+
+    // Push is on only when app/google-services.json exists (local file or CI secret).
+    // A missing file must still compile: the Firebase init provider is stripped and
+    // BuildConfig.PUSH_ENABLED is false, so the app never touches Firebase.
+    val pushEnabled = file("google-services.json").let { it.isFile && it.length() > 0L }
+    logger.lifecycle(
+        "FCM push ${if (pushEnabled) "enabled (app/google-services.json)" else "disabled (no app/google-services.json)"}"
+    )
+    defaultConfig {
+        buildConfigField("boolean", "PUSH_ENABLED", pushEnabled.toString())
+    }
 }
 
 tasks.register("checkReleaseSigning") {
@@ -112,8 +123,17 @@ kotlin {
     compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
 }
 
+if (file("google-services.json").let { it.isFile && it.length() > 0L }) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 dependencies {
     implementation("com.plivo.endpoint:endpoint:3.2.2-beta")
+
+    // Always on the classpath so PushService compiles. Without google-services.json the
+    // init provider is removed and PhoneManager never calls Firebase.
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.core:core-ktx:1.16.0")

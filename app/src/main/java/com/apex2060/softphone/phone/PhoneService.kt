@@ -11,7 +11,6 @@ import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -29,6 +28,7 @@ import com.apex2060.softphone.history.Outcome
 import com.apex2060.softphone.ui.CallActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -36,8 +36,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Keeps the Plivo registration alive while the app is in the background, rings for incoming calls,
- * and holds microphone access during a call.
+ * Runs for the length of a call: ringtone, full-screen notification, microphone.
+ * It does not keep a SIP registration alive. The debug "stay registered" action is the
+ * only path that leaves it running while idle.
  */
 class PhoneService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -46,25 +47,24 @@ class PhoneService : Service() {
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var screenWake: PowerManager.WakeLock? = null
-    private var stayAwake: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    private var holdingStay = false
+    private var stayJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        goForeground(Notifications.status(this, PhoneManager.registration.value, null), mic = false)
-        acquireKeepAlive()
-        watchNetwork()
+        holdingStay = ConfigStore.stayRegistered
+        goForeground(Notifications.status(this, PhoneManager.registration.value, PhoneManager.call.value), mic = false)
 
         scope.launch {
             ConfigStore.config.collect { cfg ->
                 if (cfg == null) {
                     PhoneManager.logout()
                     stopSelf()
-                } else {
-                    PhoneManager.login(cfg.sipUsername, cfg.sipPassword)
+                } else if (holdingStay) {
+                    PhoneManager.login(cfg.sipUsername, cfg.sipPassword, reason = "stay")
                 }
             }
         }
@@ -82,34 +82,36 @@ class PhoneService : Service() {
         }
         scope.launch {
             while (true) {
-                delay(REGISTER_REFRESH_MS)
-                PhoneManager.refreshRegistration("timer")
-            }
-        }
-        scope.launch {
-            while (true) {
-                refreshIfDue()
+                refreshConfigIfDue(this@PhoneService)
                 delay(60 * 60_000L)
             }
         }
+        if (holdingStay) startStayLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_DECLINE -> PhoneManager.decline()
             ACTION_HANGUP -> PhoneManager.hangup()
+            ACTION_STAY -> {
+                holdingStay = true
+                startStayLoop()
+                ConfigStore.config.value?.let {
+                    PhoneManager.login(it.sipUsername, it.sipPassword, reason = "stay")
+                }
+            }
+            ACTION_STOP_STAY -> {
+                holdingStay = false
+                stopStayLoop()
+            }
         }
-        return START_STICKY
+        maybeStop(PhoneManager.call.value)
+        return if (holdingStay) START_STICKY else START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        networkCallback?.let {
-            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
-        }
-        networkCallback = null
+        stopStayLoop()
         stopRing()
-        stayAwake?.let { if (it.isHeld) it.release() }
-        wifiLock?.let { if (it.isHeld) it.release() }
         scope.cancel()
         super.onDestroy()
     }
@@ -129,7 +131,52 @@ class PhoneService : Service() {
         lastPhase = call?.phase
 
         val inCall = call != null && call.phase in setOf(CallPhase.DIALING, CallPhase.RINGING_OUT, CallPhase.ACTIVE)
-        goForeground(Notifications.status(this, reg, call), mic = inCall)
+        if (inCall || holdingStay || call?.phase == CallPhase.RINGING_IN) {
+            goForeground(Notifications.status(this, reg, call), mic = inCall)
+        }
+        maybeStop(call)
+    }
+
+    private fun maybeStop(call: CallState?) {
+        val idle = call == null || call.phase == CallPhase.ENDED
+        if (!idle || holdingStay) return
+        Log.i(TAG, "call service stopping")
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    /** Debug toggle only. No wake lock and no wifi lock. */
+    private fun startStayLoop() {
+        if (stayJob != null) return
+        Log.i(TAG, "stay-registered loop started")
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                scope.launch { PhoneManager.refreshRegistration("network") }
+            }
+
+            override fun onLost(network: Network) {
+                scope.launch { PhoneManager.refreshRegistration("network") }
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+            .onSuccess { networkCallback = callback }
+            .onFailure { Log.w(TAG, "network callback failed: ${it.javaClass.simpleName}") }
+        stayJob = scope.launch {
+            while (holdingStay) {
+                delay(REGISTER_REFRESH_MS)
+                PhoneManager.refreshRegistration("timer")
+            }
+        }
+    }
+
+    private fun stopStayLoop() {
+        stayJob?.cancel()
+        stayJob = null
+        networkCallback?.let {
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
+        }
+        networkCallback = null
     }
 
     private fun startRing(number: String) {
@@ -149,8 +196,7 @@ class PhoneService : Service() {
         if (mode == AudioManager.RINGER_MODE_NORMAL) startTone()
         wakeScreen()
         // Full-screen intent is the reliable path while backgrounded, and only when Android 14+
-        // has actually granted it. Otherwise open the call screen ourselves (foreground, or as a
-        // best-effort when the system will not).
+        // has actually granted it. Otherwise open the call screen ourselves.
         if (foreground || !fullScreen) {
             Log.i(TAG, "opening call screen foreground=$foreground fullScreenIntent=$fullScreen")
             runCatching {
@@ -216,46 +262,6 @@ class PhoneService : Service() {
         screenWake = null
     }
 
-    /** CPU and wifi stay up so the 120s REGISTER and UDP keepalive survive Doze. */
-    @Suppress("DEPRECATION")
-    private fun acquireKeepAlive() {
-        val pm = getSystemService(PowerManager::class.java)
-        stayAwake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "softphone:register").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
-        val mode = if (Build.VERSION.SDK_INT >= 29) {
-            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-        } else {
-            WifiManager.WIFI_MODE_FULL_HIGH_PERF
-        }
-        wifiLock = runCatching {
-            applicationContext.getSystemService(WifiManager::class.java)
-                ?.createWifiLock(mode, "softphone:register")
-                ?.apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-        }.onFailure { Log.w(TAG, "wifi lock failed: ${it.javaClass.simpleName}") }.getOrNull()
-        Log.i(TAG, "keep-alive held wake=${stayAwake?.isHeld == true} wifi=${wifiLock?.isHeld == true}")
-    }
-
-    private fun watchNetwork() {
-        val cm = getSystemService(ConnectivityManager::class.java)
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                scope.launch { PhoneManager.refreshRegistration("network") }
-            }
-
-            override fun onLost(network: Network) {
-                scope.launch { PhoneManager.refreshRegistration("network") }
-            }
-        }
-        runCatching { cm.registerDefaultNetworkCallback(callback) }
-            .onSuccess { networkCallback = callback }
-            .onFailure { Log.w(TAG, "network callback failed: ${it.javaClass.simpleName}") }
-    }
-
     private fun goForeground(notification: android.app.Notification, mic: Boolean) {
         val base = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         val withMic = if (mic && Build.VERSION.SDK_INT >= 30) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else base
@@ -268,29 +274,27 @@ class PhoneService : Service() {
         }
     }
 
-    private suspend fun refreshIfDue() {
-        val cfg = ConfigStore.config.value ?: return
-        val ticket = ConfigStore.ticket ?: return
-        if (cfg.refreshHours == 0) return
-        if (System.currentTimeMillis() - ConfigStore.refreshedAt < cfg.refreshHours * 3_600_000L) return
-        try {
-            val (json, next) = Provisioner.fetch(ticket)
-            ConfigStore.save(ticket, json, next)
-        } catch (e: RevokedException) {
-            deprovision(this)
-        } catch (e: Exception) {
-            Log.w(TAG, "config refresh failed: ${e.message}")
-        }
-    }
-
     companion object {
         private const val TAG = "PhoneService"
         private const val REGISTER_REFRESH_MS = 90_000L
         const val ACTION_DECLINE = "com.apex2060.softphone.DECLINE"
         const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
+        const val ACTION_STAY = "com.apex2060.softphone.STAY"
+        const val ACTION_STOP_STAY = "com.apex2060.softphone.STOP_STAY"
 
-        fun start(context: Context) {
+        fun startForCall(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
+        }
+
+        fun startStay(context: Context) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_STAY),
+            )
+        }
+
+        fun stopStay(context: Context) {
+            context.startService(Intent(context, PhoneService::class.java).setAction(ACTION_STOP_STAY))
         }
 
         /** Returns the phone to its factory state: only the QR scanner remains. */
@@ -299,6 +303,21 @@ class PhoneService : Service() {
             CallHistory.clear()
             ConfigStore.clear()
             context.getSystemService(NotificationManager::class.java).cancelAll()
+        }
+
+        suspend fun refreshConfigIfDue(context: Context) {
+            val cfg = ConfigStore.config.value ?: return
+            val ticket = ConfigStore.ticket ?: return
+            if (cfg.refreshHours == 0) return
+            if (System.currentTimeMillis() - ConfigStore.refreshedAt < cfg.refreshHours * 3_600_000L) return
+            try {
+                val (json, next) = Provisioner.fetch(ticket)
+                ConfigStore.save(ticket, json, next)
+            } catch (e: RevokedException) {
+                deprovision(context)
+            } catch (e: Exception) {
+                Log.w(TAG, "config refresh failed: ${e.message}")
+            }
         }
     }
 }

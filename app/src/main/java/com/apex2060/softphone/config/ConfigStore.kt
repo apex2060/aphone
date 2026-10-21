@@ -13,6 +13,8 @@ object ConfigStore {
     private const val KEY_REFRESHED = "refreshed_at"
     private const val KEY_ASKED_BATTERY = "asked_battery"
     private const val KEY_ASKED_FULL_SCREEN = "asked_full_screen"
+    private const val KEY_FCM_TOKEN = "fcm_token"
+    private const val KEY_STAY_REGISTERED = "stay_registered"
 
     private lateinit var prefs: SharedPreferences
     private val _config = MutableStateFlow<ProvisionConfig?>(null)
@@ -37,6 +39,16 @@ object ConfigStore {
     var askedFullScreen: Boolean
         get() = prefs.getBoolean(KEY_ASKED_FULL_SCREEN, false)
         set(value) = prefs.edit().putBoolean(KEY_ASKED_FULL_SCREEN, value).apply()
+
+    /** Last FCM token. Not the SIP password. Cleared with the rest of the phone on reset. */
+    var fcmToken: String?
+        get() = prefs.getString(KEY_FCM_TOKEN, null)?.takeIf { it.isNotBlank() }
+        set(value) = prefs.edit().putString(KEY_FCM_TOKEN, value).apply()
+
+    /** Debug aid: keep a SIP registration instead of waiting for push. Default off. */
+    var stayRegistered: Boolean
+        get() = prefs.getBoolean(KEY_STAY_REGISTERED, false)
+        set(value) = prefs.edit().putBoolean(KEY_STAY_REGISTERED, value).apply()
 
     fun save(ticket: ProvisionTicket, json: String, config: ProvisionConfig) {
         prefs.edit()

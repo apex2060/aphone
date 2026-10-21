@@ -7,6 +7,7 @@ import com.apex2060.softphone.config.ConfigStore
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (ConfigStore.config.value != null) PhoneService.start(context)
+        // A normal boot waits for FCM. The debug toggle is the only reason to start now.
+        if (ConfigStore.config.value != null && ConfigStore.stayRegistered) PhoneService.startStay(context)
     }
 }

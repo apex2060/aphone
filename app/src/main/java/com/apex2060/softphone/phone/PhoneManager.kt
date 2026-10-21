@@ -38,6 +38,12 @@ data class LineStatus(
     val lastInviteAt: Long? = null,
     val lastInviteFrom: String? = null,
     val lastInviteCallId: String? = null,
+    val pushEnabled: Boolean = false,
+    val fcmTokenMasked: String = "none",
+    val lastPushAt: Long? = null,
+    val lastPushFrom: String? = null,
+    val lastRelayResult: String = "none",
+    val stayRegistered: Boolean = false,
 )
 
 data class CallState(
@@ -100,12 +106,26 @@ object PhoneManager : EventListener {
     private var lastInviteAt: Long? = null
     private var lastInviteFrom: String? = null
     private var lastInviteCallId: String? = null
+    private var deviceToken: String? = null
+    private var loggedInWithDeviceToken = false
+    private var loginReason = "login"
+    private var reloginAfterLogout = false
+    private var pendingPush: Map<String, String>? = null
+    private var pendingDial: String? = null
+    private var releaseResult: String? = null
+    private var handlingPush = false
+    private var lastPushAt: Long? = null
+    private var lastPushFrom: String? = null
+    private var lastRelayResult = "none"
 
     @Volatile private var foregroundActivities = 0
 
     fun init(context: Context) {
         app = context.applicationContext
+        deviceToken = ConfigStore.fcmToken
     }
+
+    val stayRegistered: Boolean get() = ConfigStore.stayRegistered
 
     /** MainActivity and CallActivity. The service uses this to decide if it can open the call screen. */
     fun onActivityStarted() { foregroundActivities++ }
@@ -118,42 +138,67 @@ object PhoneManager : EventListener {
     fun registrationSnapshot(): String {
         val ep = endpoint
         return "state=${_registration.value} sdkRegistered=${ep?.registered == true} " +
-            "regTimeout=${ep?.registrationTimeout ?: 0}s user=${creds?.first ?: "-"} lastRegister=$lastRegisterResult"
+            "regTimeout=${ep?.registrationTimeout ?: 0}s user=${creds?.first ?: "-"} lastRegister=$lastRegisterResult " +
+            "push=${if (BuildConfig.PUSH_ENABLED) "on" else "off"} fcm=${maskToken(deviceToken)} relay=$lastRelayResult"
     }
 
     // ---- registration -------------------------------------------------------------------------
 
-    /** Idempotent: safe to call whenever the config is (re)loaded. Must be called on main. */
-    fun login(username: String, password: String) {
-        wantOnline = true
+    /**
+     * Registers the endpoint. [token] is the FCM token when push is in use; Plivo stores it on
+     * this REGISTER and later wakes the app with a data message instead of a bare INVITE.
+     * [reason] is `token` (publish the token, then drop the contact), `outgoing`, `push`, or `stay`.
+     */
+    fun login(username: String, password: String, token: String? = null, reason: String = "login") {
+        val ep = ensureEndpoint()
         val next = username to password
-        val ep = endpoint ?: Endpoint.newInstance(app, BuildConfig.DEBUG, this).also {
-            endpoint = it
-            installCallHook(it)
-        }
+        val previousToken = deviceToken
+        val nextToken = token?.takeIf { it.isNotBlank() } ?: previousToken
+        if (!nextToken.isNullOrBlank()) deviceToken = nextToken
+        loginReason = reason
+        wantOnline = true
         applyRegTimeout(ep)
-        if (creds == next && _registration.value in setOf(Registration.ONLINE, Registration.CONNECTING)) {
+        val sameCreds = creds == next
+        val sameToken = nextToken == previousToken
+        if (reason != "push" && sameCreds && sameToken &&
+            _registration.value in setOf(Registration.ONLINE, Registration.CONNECTING)
+        ) {
             publishLine()
             return
         }
-        if (creds != null && creds != next && ep.registered) {
-            // Credentials rotated: log out first, onLogout() logs back in with the new pair.
-            pendingCreds = next
+        if (ep.registered && (!sameCreds || (nextToken != null && nextToken != previousToken))) {
+            reloginAfterLogout = true
+            creds = next
             ep.logout()
             return
         }
         creds = next
         _registration.value = Registration.CONNECTING
         publishLine()
-        Log.i(TAG, "login user=$username regTimeout=${ep.registrationTimeout}s")
-        if (!ep.login(username, password)) scheduleRetry() else lastRefreshAtMs = System.currentTimeMillis()
+        Log.i(TAG, "login user=$username reason=$reason regTimeout=${ep.registrationTimeout}s fcm=${maskToken(deviceToken)}")
+        if (!sendLogin(ep)) scheduleRetry() else lastRefreshAtMs = System.currentTimeMillis()
     }
 
+    private fun sendLogin(ep: Endpoint): Boolean {
+        val c = creds ?: return false
+        val token = deviceToken?.takeIf { it.isNotBlank() }
+        val ok = if (token != null) ep.login(c.first, c.second, token) else ep.login(c.first, c.second)
+        if (ok && token != null) loggedInWithDeviceToken = true
+        return ok
+    }
+
+    private fun ensureEndpoint(): Endpoint =
+        endpoint ?: Endpoint.newInstance(app, BuildConfig.DEBUG, this).also {
+            endpoint = it
+            installCallHook(it)
+        }
+
     /**
-     * Re-bind the contact so an inbound INVITE still has somewhere to land.
+     * Re-bind the contact. Used only while the debug "stay registered" toggle is on.
      * [reason] is `resume`, `network`, or `timer`. No-op during a call.
      */
     fun refreshRegistration(reason: String) {
+        if (!stayRegistered) return
         val ep = endpoint ?: return
         if (!wantOnline) return
         val now = System.currentTimeMillis()
@@ -168,10 +213,12 @@ object PhoneManager : EventListener {
         lastRefreshAt = now
         Log.i(TAG, "registration refresh reason=$reason ${registrationSnapshot()}")
         if (!ep.registered || _registration.value != Registration.ONLINE) {
-            val c = creds ?: return
+            val c = creds ?: ConfigStore.config.value?.let { it.sipUsername to it.sipPassword } ?: return
+            creds = c
+            loginReason = "stay"
             _registration.value = Registration.CONNECTING
             publishLine()
-            if (!ep.login(c.first, c.second)) scheduleRetry()
+            if (!sendLogin(ep)) scheduleRetry()
         } else {
             runCatching { ep.networkChange() }
                 .onFailure { Log.w(TAG, "networkChange failed: ${it.javaClass.simpleName}") }
@@ -188,6 +235,11 @@ object PhoneManager : EventListener {
     fun logout() {
         wantOnline = false
         pendingCreds = null
+        pendingDial = null
+        pendingPush = null
+        reloginAfterLogout = false
+        loggedInWithDeviceToken = false
+        deviceToken = null
         main.removeCallbacks(retry)
         main.removeCallbacks(watchdog)
         endpoint?.let { if (it.registered) it.logout() }
@@ -197,14 +249,34 @@ object PhoneManager : EventListener {
         publishLine()
     }
 
+    /** Drop the SIP contact after the FCM token has been published, or after a call. */
+    private fun releaseContact(result: String) {
+        if (stayRegistered || activeCall() != null || pendingDial != null) return
+        wantOnline = false
+        main.removeCallbacks(retry)
+        val ep = endpoint
+        releaseResult = result
+        lastRegisterResult = result
+        if (ep?.registered == true) {
+            Log.i(TAG, "releasing SIP contact result=$result ${registrationSnapshot()}")
+            ep.logout()
+        } else {
+            loggedInWithDeviceToken = false
+            _registration.value = Registration.OFFLINE
+            publishLine()
+            Log.i(TAG, "SIP contact already down result=$result")
+        }
+    }
+
     private val retry = Runnable {
         val c = creds ?: return@Runnable
         if (wantOnline && _registration.value != Registration.ONLINE) {
-            endpoint?.let { applyRegTimeout(it) }
+            val ep = endpoint ?: return@Runnable
+            applyRegTimeout(ep)
             _registration.value = Registration.CONNECTING
             publishLine()
-            Log.i(TAG, "login retry user=${c.first} regTimeout=${endpoint?.registrationTimeout ?: 0}s")
-            if (endpoint?.login(c.first, c.second) == true) lastRefreshAtMs = System.currentTimeMillis() else scheduleRetry()
+            Log.i(TAG, "login retry user=${c.first} reason=$loginReason regTimeout=${ep.registrationTimeout}s fcm=${maskToken(deviceToken)}")
+            if (sendLogin(ep)) lastRefreshAtMs = System.currentTimeMillis() else scheduleRetry()
         }
     }
 
@@ -230,6 +302,12 @@ object PhoneManager : EventListener {
             lastInviteAt = lastInviteAt,
             lastInviteFrom = lastInviteFrom,
             lastInviteCallId = lastInviteCallId,
+            pushEnabled = BuildConfig.PUSH_ENABLED,
+            fcmTokenMasked = maskToken(deviceToken),
+            lastPushAt = lastPushAt,
+            lastPushFrom = lastPushFrom,
+            lastRelayResult = lastRelayResult,
+            stayRegistered = stayRegistered,
         )
     }
 
@@ -239,18 +317,53 @@ object PhoneManager : EventListener {
         retryDelayMs = RETRY_MIN_MS
         _registration.value = Registration.ONLINE
         publishLine()
-        Log.i(TAG, "registered ${registrationSnapshot()}")
+        Log.i(TAG, "registered reason=$loginReason ${registrationSnapshot()}")
+        val number = pendingDial
+        if (number != null) {
+            pendingDial = null
+            main.post { placeOutgoing(number) }
+            return
+        }
+        // A token publish is not a call. Drop the contact so Plivo sends a push next time
+        // instead of an INVITE to a registration this process will not keep alive.
+        if (loginReason == "token" && !stayRegistered && activeCall() == null) {
+            main.post { releaseContact("token-registered") }
+        }
     }
 
     override fun onLogout() {
         Log.i(TAG, "logged out")
-        lastRegisterResult = "logged-out"
+        loggedInWithDeviceToken = false
+        val push = pendingPush
+        pendingPush = null
+        if (push != null) {
+            _registration.value = Registration.OFFLINE
+            publishLine()
+            main.post { onPush(push) }
+            return
+        }
+        if (reloginAfterLogout) {
+            reloginAfterLogout = false
+            val next = creds
+            _registration.value = Registration.OFFLINE
+            publishLine()
+            if (next != null) main.post { login(next.first, next.second, deviceToken, loginReason) }
+            return
+        }
+        val next = pendingCreds
+        pendingCreds = null
+        if (next != null) {
+            creds = null
+            _registration.value = Registration.OFFLINE
+            publishLine()
+            main.post { login(next.first, next.second, deviceToken, loginReason) }
+            return
+        }
+        val released = releaseResult
+        releaseResult = null
+        lastRegisterResult = released ?: if (loginReason == "token") "token-registered" else "logged-out"
         _registration.value = Registration.OFFLINE
         publishLine()
-        val next = pendingCreds ?: return
-        pendingCreds = null
-        creds = null
-        main.post { login(next.first, next.second) }
     }
 
     override fun onLoginFailed() = onLoginFailed("unknown")
@@ -259,10 +372,166 @@ object PhoneManager : EventListener {
         lastRegisterResult = "failed:${reason ?: "unknown"}"
         lastRegisterAt = System.currentTimeMillis()
         Log.w(TAG, "login failed: ${reason ?: "unknown"} user=${creds?.first ?: "-"}")
+        if (handlingPush) {
+            publishLine()
+            return
+        }
+        val number = pendingDial
         main.post {
             publishLine()
-            if (wantOnline) scheduleRetry()
+            if (number != null) {
+                pendingDial = null
+                finish(Outcome.FAILED, "Can't reach Plivo")
+            } else if (wantOnline) {
+                scheduleRetry()
+            }
         }
+    }
+
+    // ---- push ---------------------------------------------------------------------------------
+
+    /** Fetch the FCM token and register it with Plivo. No-op when push is compiled out. */
+    fun onProvisioned() {
+        val cfg = ConfigStore.config.value ?: return
+        if (!BuildConfig.PUSH_ENABLED) {
+            lastRelayResult = "push-disabled"
+            publishLine()
+            Log.i(TAG, "push disabled (no google-services.json)")
+            if (stayRegistered) login(cfg.sipUsername, cfg.sipPassword, reason = "stay")
+            return
+        }
+        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { token -> onFcmToken(token) }
+            .addOnFailureListener { err ->
+                Log.w(TAG, "fcm token failed: ${err.javaClass.simpleName}")
+                noteRelay("failed:token")
+            }
+    }
+
+    fun onFcmToken(token: String) {
+        if (token.isBlank()) return
+        val changed = token != deviceToken
+        deviceToken = token
+        ConfigStore.fcmToken = token
+        Log.i(TAG, "fcm token ${maskToken(token)}")
+        publishLine()
+        val cfg = ConfigStore.config.value ?: return
+        if (!changed && (lastRegisterResult == "token-registered" || lastRegisterResult == "ok")) return
+        val reason = if (stayRegistered) "stay" else "token"
+        if (reason == "token" && (activeCall() != null || pendingDial != null)) return
+        login(cfg.sipUsername, cfg.sipPassword, token, reason = reason)
+    }
+
+    /** Debug-only. Keeps a SIP registration and the refresh timer instead of waiting for push. */
+    fun setStayRegistered(enabled: Boolean) {
+        ConfigStore.stayRegistered = enabled
+        publishLine()
+        val cfg = ConfigStore.config.value ?: return
+        if (enabled) {
+            login(cfg.sipUsername, cfg.sipPassword, deviceToken, reason = "stay")
+        } else if (activeCall() == null) {
+            releaseContact("stay-off")
+        }
+    }
+
+    /**
+     * Plivo's high-priority data message. Required keys are registrar, index, and label.
+     * [Endpoint.loginForIncomingWithUsername] registers from that message and constructs
+     * the real [Incoming]. [Endpoint.relayVoipPushNotification] is the deprecated path.
+     */
+    fun onPush(data: Map<String, String>) {
+        val from = sipUser(data["callerID"]) ?: data["callerID"]?.takeIf { it.length <= 64 } ?: "unknown"
+        lastPushAt = System.currentTimeMillis()
+        lastPushFrom = from
+        Log.i(TAG, "push received from=$from keys=${data.keys.sorted().joinToString(",")}")
+        if (!BuildConfig.PUSH_ENABLED) {
+            noteRelay("skipped:push-disabled")
+            return
+        }
+        val cfg = ConfigStore.config.value
+        if (cfg == null) {
+            noteRelay("failed:no-credentials")
+            return
+        }
+        val missing = listOf("registrar", "index", "label").filter { it !in data }
+        if (missing.isNotEmpty()) {
+            noteRelay("failed:missing:${missing.joinToString("+")}")
+            return
+        }
+        val token = deviceToken
+        if (token.isNullOrBlank()) {
+            noteRelay("failed:no-token")
+            return
+        }
+        val ep = ensureEndpoint()
+        val busy = activeCall() != null && _call.value?.phase != CallPhase.RINGING_IN
+        if (busy) {
+            noteRelay("failed:busy")
+            Log.w(TAG, "push while a call is still ${_call.value?.phase}; leaving that call")
+            return
+        }
+        // relayVoipPushNotification returns immediately when a previous leg is still active,
+        // and then no Incoming is built. Reset those flags only when the UI has no call.
+        if (ep.isCallRunning) {
+            Log.w(TAG, "resetting stale SDK call before push")
+            resetSdkLegs(ep)
+        }
+        creds = cfg.sipUsername to cfg.sipPassword
+        loginReason = "push"
+        wantOnline = true
+        applyRegTimeout(ep)
+        // loginForIncomingWithUsername is the supported push entry. It registers from the
+        // data message and constructs Incoming. relayVoipPushNotification is deprecated and
+        // refuses to run unless this process already logged in with a device token.
+        handlingPush = true
+        val ok = runCatching {
+            ep.loginForIncomingWithUsername(cfg.sipUsername, cfg.sipPassword, token, "", java.util.HashMap(data))
+        }.getOrElse {
+            noteRelay("failed:${it.javaClass.simpleName}")
+            false
+        }
+        handlingPush = false
+        if (!ok) {
+            if (lastRelayResult == "none" || lastRelayResult == "relogin") noteRelay("failed:login-incoming")
+            else if (!lastRelayResult.startsWith("failed:")) noteRelay("failed:login-incoming")
+            return
+        }
+        loggedInWithDeviceToken = true
+        val inc = sdkIncoming()
+        noteRelay(if (inc != null) "ok" else "ok:no-incoming")
+        Log.i(TAG, "loginForIncomingWithUsername from=$from incoming=${inc != null} ${registrationSnapshot()}")
+        showIncoming(from, inc)
+    }
+
+    private fun sdkIncoming(): Incoming? {
+        val sc = controller() ?: return null
+        return runCatching {
+            SipController::class.java.getDeclaredField("incoming").apply { isAccessible = true }.get(sc) as? Incoming
+        }.getOrNull()
+    }
+
+    /** Clears isActive on leftover legs so a push can construct a new Incoming. */
+    private fun resetSdkLegs(ep: Endpoint) {
+        val reset = runCatching {
+            Class.forName("com.plivo.endpoint.IO").getDeclaredMethod("reset").apply { isAccessible = true }
+        }.getOrNull() ?: return
+        val legs = buildList {
+            outgoing?.let { add(it) }
+            incoming?.let { add(it) }
+            runCatching {
+                Endpoint::class.java.getDeclaredField("curOutgoing").apply { isAccessible = true }.get(ep)
+            }.getOrNull()?.let { add(it) }
+            sdkIncoming()?.let { add(it) }
+        }
+        legs.distinct().forEach { leg -> runCatching { reset.invoke(leg) } }
+        incoming = null
+        outgoing = null
+    }
+
+    private fun noteRelay(result: String) {
+        lastRelayResult = result
+        Log.i(TAG, "relay $result")
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) publishLine() else main.post { publishLine() }
     }
 
     // ---- calls --------------------------------------------------------------------------------
@@ -281,16 +550,33 @@ object PhoneManager : EventListener {
     }
 
     fun dial(raw: String): Boolean {
-        val ep = endpoint ?: return false
-        if (_registration.value != Registration.ONLINE || activeCall() != null) return false
+        val cfg = ConfigStore.config.value ?: return false
+        if (activeCall() != null) return false
         val number = normalize(raw)
         if (number.isEmpty()) return false
-        val out = ep.createOutgoingCall() ?: return false
-        outgoing = out
+        ensureEndpoint()
         sawSignalling = false
         _call.value = CallState(Direction.OUTGOING, number, CallPhase.DIALING)
         armWatchdog()
-        Log.i(TAG, "dial $number sdkCallRunning=${sdkCallRunning()}")
+        Log.i(TAG, "dial $number ${registrationSnapshot()}")
+        if (_registration.value == Registration.ONLINE && endpoint?.registered == true) {
+            return placeOutgoing(number)
+        }
+        pendingDial = number
+        login(cfg.sipUsername, cfg.sipPassword, deviceToken, reason = "outgoing")
+        return true
+    }
+
+    private fun placeOutgoing(number: String): Boolean {
+        val ep = endpoint ?: return false
+        val out = ep.createOutgoingCall()
+        if (out == null) {
+            Log.w(TAG, "dial rejected by SDK for $number")
+            finish(Outcome.FAILED, "Call failed")
+            return false
+        }
+        outgoing = out
+        Log.i(TAG, "placing $number sdkCallRunning=${sdkCallRunning()}")
         if (!out.call(number)) {
             Log.w(TAG, "dial rejected by SDK for $number")
             finish(Outcome.FAILED, "Call failed")
@@ -431,6 +717,9 @@ object PhoneManager : EventListener {
 
         // Hold ENDED only long enough for the missed-call notification to observe it.
         main.postDelayed({ if (_call.value?.startedAt == state.startedAt) _call.value = null }, ENDED_HOLD_MS)
+        if (!stayRegistered && pendingDial == null) {
+            main.postDelayed({ releaseContact("call-ended") }, ENDED_HOLD_MS)
+        }
     }
 
     /** A call the UI still considers in progress. The brief ENDED hold does not count. */
@@ -501,7 +790,8 @@ object PhoneManager : EventListener {
     }
 
     private fun callerOf(inc: Incoming): String {
-        val raw = inc.fromContact?.takeIf { it.isNotBlank() } ?: inc.fromSip.orEmpty()
+        val contact = inc.fromContact
+        val raw = if (!contact.isNullOrBlank()) contact else runCatching { inc.fromSip }.getOrNull().orEmpty()
         return sipUser(raw) ?: "Unknown"
     }
 
@@ -827,6 +1117,13 @@ private fun summarizeSignal(raw: String?): String {
     }
     val cleaned = text.replace(Regex("(?i)(password|authorization)\\s*[=:]\\s*\\S+"), "$1=<redacted>")
     return cleaned.take(160).ifBlank { "no-detail" }
+}
+
+/** First and last four characters. The full token is never logged or shown. */
+internal fun maskToken(token: String?): String {
+    if (token.isNullOrBlank()) return "none"
+    if (token.length <= 8) return "present"
+    return token.take(4) + "…" + token.takeLast(4)
 }
 
 private fun sipUser(value: String?): String? {

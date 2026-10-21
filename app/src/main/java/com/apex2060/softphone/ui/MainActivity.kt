@@ -14,6 +14,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.apex2060.softphone.config.ConfigStore
@@ -33,7 +35,8 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { askBatteryExemption() }
                 LaunchedEffect(cfg.sipUsername) {
-                    PhoneService.start(this@MainActivity)
+                    PhoneManager.onProvisioned()
+                    if (PhoneManager.stayRegistered) PhoneService.startStay(this@MainActivity)
                     val wanted = buildList {
                         add(Manifest.permission.RECORD_AUDIO)
                         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
@@ -62,7 +65,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (ConfigStore.config.value == null) return
-        PhoneManager.refreshRegistration("resume")
+        if (PhoneManager.stayRegistered) PhoneManager.refreshRegistration("resume")
+        lifecycleScope.launch { PhoneService.refreshConfigIfDue(this@MainActivity) }
         // Battery is requested from the permission result. Ask for full-screen on the next resume
         // so the two settings screens are not stacked.
         if (ConfigStore.askedBattery) askFullScreenIntent()
