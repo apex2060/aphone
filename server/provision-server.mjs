@@ -1,4 +1,4 @@
-// Minimal provisioning endpoint for the softphone. Node 18+, no dependencies.
+// Minimal provisioning endpoint for 22 Phone. Node 18+, no dependencies.
 //
 //   cp devices.example.json devices.json   # edit keys, SIP creds, colors
 //   node provision-server.mjs              # PORT=8080 by default

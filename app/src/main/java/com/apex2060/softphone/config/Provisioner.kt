@@ -18,6 +18,7 @@ object Provisioner {
 
     /**
      * Accepts either `{"url": "...", "key": "..."}` or a bare URL (GET, key embedded in the URL).
+     * Release builds accept only `https://` URLs. Debug builds also accept `http://` for a LAN server.
      */
     fun parseQr(text: String): ProvisionTicket? {
         val t = text.trim()

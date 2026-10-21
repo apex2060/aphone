@@ -7,3 +7,7 @@ local.properties
 captures/
 .kotlin/
 server/devices.json
+*.jks
+*.keystore
+*.p12
+keystore.properties

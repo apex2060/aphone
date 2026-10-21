@@ -27,12 +27,12 @@ object Notifications {
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(CH_STATUS, "Phone status", NotificationManager.IMPORTANCE_LOW).apply {
+            NotificationChannel(CH_STATUS, context.getString(R.string.notif_channel_status), NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false)
             }
         )
         nm.createNotificationChannel(
-            NotificationChannel(CH_INCOMING, "Incoming calls", NotificationManager.IMPORTANCE_HIGH).apply {
+            NotificationChannel(CH_INCOMING, context.getString(R.string.notif_channel_incoming), NotificationManager.IMPORTANCE_HIGH).apply {
                 setSound(
                     RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
                     AudioAttributes.Builder()
@@ -46,11 +46,13 @@ object Notifications {
             }
         )
         nm.createNotificationChannel(
-            NotificationChannel(CH_MISSED, "Missed calls", NotificationManager.IMPORTANCE_DEFAULT)
+            NotificationChannel(CH_MISSED, context.getString(R.string.notif_channel_missed), NotificationManager.IMPORTANCE_DEFAULT)
         )
     }
 
-    private fun title() = ConfigStore.config.value?.title ?: "Softphone"
+    /** Line name from provisioning, or the app name before a document arrives. */
+    private fun title(context: Context) =
+        ConfigStore.config.value?.title ?: context.getString(R.string.app_name)
 
     private fun openApp(context: Context) = PendingIntent.getActivity(
         context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
@@ -77,7 +79,7 @@ object Notifications {
             .setSmallIcon(R.drawable.ic_call)
             .setOngoing(true)
             .setShowWhen(false)
-            .setContentTitle(title())
+            .setContentTitle(title(context))
             .setContentIntent(openApp(context))
         if (call != null && call.phase != CallPhase.RINGING_IN && call.phase != CallPhase.ENDED) {
             val person = Person.Builder().setName(call.number).build()
@@ -103,7 +105,7 @@ object Notifications {
         return NotificationCompat.Builder(context, CH_INCOMING)
             .setSmallIcon(R.drawable.ic_call)
             .setContentTitle(number)
-            .setContentText("Incoming call · ${title()}")
+            .setContentText("Incoming call · ${title(context)}")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
