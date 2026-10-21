@@ -38,6 +38,10 @@ data class LineStatus(
     val lastInviteAt: Long? = null,
     val lastInviteFrom: String? = null,
     val lastInviteCallId: String? = null,
+    val loginAttemptAt: Long? = null,
+    val lastSdkReason: String? = null,
+    val lastCallResult: String = "none",
+    val lastCallAt: Long? = null,
 )
 
 data class CallState(
@@ -68,6 +72,9 @@ object PhoneManager : EventListener {
     /** Shortest expiry the SDK accepts. A 30-day REGISTER lets NAT drop inbound INVITEs. */
     private const val REG_TIMEOUT_SEC = 120
     private const val REFRESH_DEBOUNCE_MS = 15_000L
+
+    /** How long one login attempt may sit on Connecting before it is shown as a failure. */
+    private const val LOGIN_TIMEOUT_MS = 20_000L
 
     private lateinit var app: Context
     private val main = Handler(Looper.getMainLooper())
@@ -100,6 +107,10 @@ object PhoneManager : EventListener {
     private var lastInviteAt: Long? = null
     private var lastInviteFrom: String? = null
     private var lastInviteCallId: String? = null
+    private var loginAttemptAt: Long? = null
+    private var lastSdkReason: String? = null
+    private var lastCallResult = "none"
+    private var lastCallAt: Long? = null
 
     @Volatile private var foregroundActivities = 0
 
@@ -118,7 +129,8 @@ object PhoneManager : EventListener {
     fun registrationSnapshot(): String {
         val ep = endpoint
         return "state=${_registration.value} sdkRegistered=${ep?.registered == true} " +
-            "regTimeout=${ep?.registrationTimeout ?: 0}s user=${creds?.first ?: "-"} lastRegister=$lastRegisterResult"
+            "regTimeout=${ep?.registrationTimeout ?: 0}s user=${creds?.first ?: "-"} " +
+            "lastRegister=$lastRegisterResult sdkReason=${lastSdkReason ?: "-"}"
     }
 
     // ---- registration -------------------------------------------------------------------------
@@ -132,7 +144,13 @@ object PhoneManager : EventListener {
             installCallHook(it)
         }
         applyRegTimeout(ep)
-        if (creds == next && _registration.value in setOf(Registration.ONLINE, Registration.CONNECTING)) {
+        if (creds == next && ep.registered && _registration.value == Registration.ONLINE) {
+            publishLine()
+            return
+        }
+        // One attempt at a time. A second login() while the first is outstanding
+        // returns without a callback and leaves the UI on Connecting.
+        if (creds == next && _registration.value == Registration.CONNECTING) {
             publishLine()
             return
         }
@@ -143,40 +161,81 @@ object PhoneManager : EventListener {
             return
         }
         creds = next
-        _registration.value = Registration.CONNECTING
-        publishLine()
-        Log.i(TAG, "login user=$username regTimeout=${ep.registrationTimeout}s")
-        if (!ep.login(username, password)) scheduleRetry() else lastRefreshAtMs = System.currentTimeMillis()
+        if (!sendLogin(ep)) scheduleRetry()
     }
 
     /**
      * Re-bind the contact so an inbound INVITE still has somewhere to land.
-     * [reason] is `resume`, `network`, or `timer`. No-op during a call.
+     * [reason] is `resume`, `network`, or `timer`. No-op during a call, and it does not
+     * start a second login while one attempt is still waiting on Plivo.
      */
     fun refreshRegistration(reason: String) {
         val ep = endpoint ?: return
         if (!wantOnline) return
         val now = System.currentTimeMillis()
         if (now - lastRefreshAtMs < REFRESH_DEBOUNCE_MS) return
-        applyRegTimeout(ep)
-        if (activeCall() != null) {
-            Log.i(TAG, "registration refresh skipped reason=$reason phase=${_call.value?.phase}")
-            return
-        }
         lastRefreshAtMs = now
         lastRefreshReason = reason
         lastRefreshAt = now
-        Log.i(TAG, "registration refresh reason=$reason ${registrationSnapshot()}")
-        if (!ep.registered || _registration.value != Registration.ONLINE) {
-            val c = creds ?: return
-            _registration.value = Registration.CONNECTING
+        if (_registration.value == Registration.CONNECTING) {
+            Log.i(TAG, "registration refresh skipped reason=$reason login in progress")
             publishLine()
-            if (!ep.login(c.first, c.second)) scheduleRetry()
-        } else {
+            return
+        }
+        applyRegTimeout(ep)
+        if (activeCall() != null) {
+            Log.i(TAG, "registration refresh skipped reason=$reason phase=${_call.value?.phase}")
+            publishLine()
+            return
+        }
+        Log.i(TAG, "registration refresh reason=$reason ${registrationSnapshot()}")
+        if (ep.registered) {
+            // login() returns true and does not call onLogin when the SDK is already registered.
+            if (_registration.value != Registration.ONLINE) onLogin()
             runCatching { ep.networkChange() }
                 .onFailure { Log.w(TAG, "networkChange failed: ${it.javaClass.simpleName}") }
             publishLine()
+        } else {
+            login(creds?.first ?: return, creds?.second ?: return)
         }
+    }
+
+    /** Starts one REGISTER. False means the SDK rejected it immediately. */
+    private fun sendLogin(ep: Endpoint): Boolean {
+        val c = creds ?: return false
+        _registration.value = Registration.CONNECTING
+        loginAttemptAt = System.currentTimeMillis()
+        publishLine()
+        Log.i(TAG, "login user=${c.first} regTimeout=${ep.registrationTimeout}s")
+        val started = runCatching { ep.login(c.first, c.second) }.getOrDefault(false)
+        if (!started) return false
+        if (ep.registered) {
+            Log.i(TAG, "SDK already registered; not waiting for another onLogin")
+            onLogin()
+            return true
+        }
+        armLoginTimeout()
+        lastRefreshAtMs = System.currentTimeMillis()
+        return true
+    }
+
+    private fun armLoginTimeout() {
+        main.removeCallbacks(loginTimeout)
+        main.postDelayed(loginTimeout, LOGIN_TIMEOUT_MS)
+    }
+
+    private val loginTimeout = Runnable {
+        if (!wantOnline || _registration.value != Registration.CONNECTING) return@Runnable
+        if (endpoint?.registered == true) {
+            Log.i(TAG, "login timeout but SDK is registered; marking online")
+            onLogin()
+            return@Runnable
+        }
+        val detail = lastSdkReason?.take(80)
+        lastRegisterResult = if (detail.isNullOrBlank()) "timeout" else "timeout ($detail)"
+        lastRegisterAt = System.currentTimeMillis()
+        Log.w(TAG, "login timed out after ${LOGIN_TIMEOUT_MS / 1000}s ${registrationSnapshot()}")
+        scheduleRetry()
     }
 
     private fun applyRegTimeout(ep: Endpoint) {
@@ -189,6 +248,7 @@ object PhoneManager : EventListener {
         wantOnline = false
         pendingCreds = null
         main.removeCallbacks(retry)
+        main.removeCallbacks(loginTimeout)
         main.removeCallbacks(watchdog)
         endpoint?.let { if (it.registered) it.logout() }
         creds = null
@@ -198,17 +258,16 @@ object PhoneManager : EventListener {
     }
 
     private val retry = Runnable {
-        val c = creds ?: return@Runnable
-        if (wantOnline && _registration.value != Registration.ONLINE) {
-            endpoint?.let { applyRegTimeout(it) }
-            _registration.value = Registration.CONNECTING
-            publishLine()
-            Log.i(TAG, "login retry user=${c.first} regTimeout=${endpoint?.registrationTimeout ?: 0}s")
-            if (endpoint?.login(c.first, c.second) == true) lastRefreshAtMs = System.currentTimeMillis() else scheduleRetry()
-        }
+        val ep = endpoint ?: return@Runnable
+        if (!wantOnline || _registration.value == Registration.ONLINE) return@Runnable
+        if (_registration.value == Registration.CONNECTING) return@Runnable
+        applyRegTimeout(ep)
+        Log.i(TAG, "login retry user=${creds?.first ?: "-"} regTimeout=${ep.registrationTimeout}s")
+        if (!sendLogin(ep)) scheduleRetry()
     }
 
     private fun scheduleRetry() {
+        main.removeCallbacks(loginTimeout)
         _registration.value = Registration.FAILED
         publishLine()
         main.removeCallbacks(retry)
@@ -230,10 +289,16 @@ object PhoneManager : EventListener {
             lastInviteAt = lastInviteAt,
             lastInviteFrom = lastInviteFrom,
             lastInviteCallId = lastInviteCallId,
+            loginAttemptAt = loginAttemptAt,
+            lastSdkReason = lastSdkReason,
+            lastCallResult = lastCallResult,
+            lastCallAt = lastCallAt,
         )
     }
 
     override fun onLogin() {
+        main.removeCallbacks(loginTimeout)
+        main.removeCallbacks(retry)
         lastRegisterResult = "ok"
         lastRegisterAt = System.currentTimeMillis()
         retryDelayMs = RETRY_MIN_MS
@@ -253,12 +318,20 @@ object PhoneManager : EventListener {
         main.post { login(next.first, next.second) }
     }
 
-    override fun onLoginFailed() = onLoginFailed("unknown")
+    override fun onLoginFailed() = onLoginFailed(null)
 
     override fun onLoginFailed(reason: String?) {
-        lastRegisterResult = "failed:${reason ?: "unknown"}"
+        main.removeCallbacks(loginTimeout)
+        val detail = lastSdkReason?.take(120)
+        val code = reason?.takeIf { it.isNotBlank() }
+        lastRegisterResult = when {
+            code == null && detail.isNullOrBlank() -> "failed:no-reason"
+            code == null -> "failed:$detail"
+            detail.isNullOrBlank() || detail == code -> "failed:$code"
+            else -> "failed:$code ($detail)"
+        }.take(180)
         lastRegisterAt = System.currentTimeMillis()
-        Log.w(TAG, "login failed: ${reason ?: "unknown"} user=${creds?.first ?: "-"}")
+        Log.w(TAG, "login failed: $lastRegisterResult user=${creds?.first ?: "-"}")
         main.post {
             publishLine()
             if (wantOnline) scheduleRetry()
@@ -281,11 +354,21 @@ object PhoneManager : EventListener {
     }
 
     fun dial(raw: String): Boolean {
-        val ep = endpoint ?: return false
-        if (_registration.value != Registration.ONLINE || activeCall() != null) return false
+        val ep = endpoint ?: run {
+            noteCall("blocked:no-endpoint")
+            return false
+        }
+        val loggedIn = _registration.value == Registration.ONLINE || ep.registered
+        if (!loggedIn || activeCall() != null) {
+            noteCall("blocked:${_registration.value.name.lowercase()}")
+            return false
+        }
         val number = normalize(raw)
         if (number.isEmpty()) return false
-        val out = ep.createOutgoingCall() ?: return false
+        val out = ep.createOutgoingCall() ?: run {
+            noteCall("failed:no-outgoing")
+            return false
+        }
         outgoing = out
         sawSignalling = false
         _call.value = CallState(Direction.OUTGOING, number, CallPhase.DIALING)
@@ -398,6 +481,7 @@ object PhoneManager : EventListener {
         if (state.phase == CallPhase.ENDED) return
         // Publish ENDED before releasing the SDK. hangup/reset can re-enter this method.
         _call.value = state.copy(phase = CallPhase.ENDED, endedLabel = label, outcome = outcome)
+        noteCall("${outcome.name.lowercase()}:$label")
         val runningBefore = sdkCallRunning()
         val duration = state.answeredAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
         CallHistory.add(
@@ -617,7 +701,60 @@ object PhoneManager : EventListener {
         proxy = java.lang.reflect.Proxy.newProxyInstance(listenerClass.classLoader, arrayOf(listenerClass), handler)
         field.set(sc, proxy)
         callHookInstalled = true
+        installRegistrationHook(sc)
         Log.i(TAG, "call hook installed")
+    }
+
+    /**
+     * Username/password failures call [onLoginFailed] with no string. The SIP status
+     * (for example 401) is only on this listener. Record it for Details, then forward.
+     */
+    private fun installRegistrationHook(sc: SipController) {
+        val field = runCatching {
+            SipController::class.java.getDeclaredField("onRegistrationEventListener").apply { isAccessible = true }
+        }.getOrElse {
+            Log.e(TAG, "registration hook unavailable: ${it.javaClass.simpleName}")
+            return
+        }
+        val existing = field.get(sc) ?: run {
+            Log.e(TAG, "registration hook unavailable: SDK listener missing")
+            return
+        }
+        val listenerClass = Class.forName("com.plivo.endpoint.SipController\$OnRegistrationEventListener")
+        var proxy: Any? = null
+        val handler = java.lang.reflect.InvocationHandler { _, method, args ->
+            if (method.declaringClass == Any::class.java) {
+                return@InvocationHandler when (method.name) {
+                    "toString" -> "RegHook"
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "equals" -> args?.getOrNull(0) === proxy
+                    else -> null
+                }
+            }
+            if (method.name == "onRegistrationEvent") {
+                val eventName = (args?.getOrNull(0) as? Enum<*>)?.name
+                val clean = sanitizeSdkMessage(args?.getOrNull(1) as? String)
+                lastSdkReason = listOfNotNull(eventName, clean).joinToString(": ").ifBlank { eventName }
+                Log.i(TAG, "registration event ${lastSdkReason ?: "none"}")
+                try {
+                    method.invoke(existing, *(args ?: emptyArray()))
+                } catch (t: Throwable) {
+                    val cause = (t as? java.lang.reflect.InvocationTargetException)?.cause ?: t
+                    Log.e(TAG, "sdk registration listener threw ${cause.javaClass.simpleName}")
+                }
+                main.post { publishLine() }
+            }
+            null
+        }
+        proxy = java.lang.reflect.Proxy.newProxyInstance(listenerClass.classLoader, arrayOf(listenerClass), handler)
+        field.set(sc, proxy)
+    }
+
+    private fun noteCall(result: String) {
+        lastCallResult = result.take(120)
+        lastCallAt = System.currentTimeMillis()
+        Log.i(TAG, "call result $lastCallResult")
+        if (Looper.myLooper() == Looper.getMainLooper()) publishLine() else main.post { publishLine() }
     }
 
     private fun onSdkCallEvent(eventName: String?, payload: String?) {
@@ -818,6 +955,20 @@ private fun describeInvite(raw: String?): InviteInfo {
         cseq = headers["cseq"]?.take(40),
         headers = headers,
     )
+}
+
+/** Status line or SDK reason code. Authorization and password text are dropped. */
+private fun sanitizeSdkMessage(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    val kept = raw.lineSequence().map { it.trim().trimEnd('\r') }.filter { line ->
+        val lower = line.lowercase()
+        "authorization" !in lower && "password" !in lower && "x-provision" !in lower
+    }.joinToString(" ")
+    val cleaned = kept.replace(Regex("(?i)(password|authorization)\\s*[=:]\\s*\\S+"), "$1=<redacted>")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .take(160)
+    return cleaned.ifBlank { null }
 }
 
 private fun summarizeSignal(raw: String?): String {
