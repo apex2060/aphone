@@ -4,6 +4,8 @@ Status: plan only. This branch does not change the softphone. v1.0.5 (merge `a50
 
 The cellular failure on the Samsung SM-S908U1 (Android 16, 5G) is in that binary. It registers on Wi-Fi and returns `NOT_REGISTERED` on the carrier. v1.0.5 already says so in the header (“This network can't register”) and recreates the endpoint when the default network kind changes. Recreating it cannot add IPv6.
 
+That failure is not “no IPv4”. On 2026-10-21 the same phone, on Verizon 5G, had CGNAT IPv4 `100.90.40.193/30` (inside `100.64.0.0/10`) plus a global IPv6 address. It was not IPv6-only and not CLAT-only. 22 SIP Test 0.2, which uses a normal TLS socket, got provision HTTP 200, connected to `phone.plivo.com:5061`, answered the 401, learned public `174.201.216.174:2795` from Via, and finished `REGISTER 200`. The SDK still failed on this network in v1.0.5 even though an IPv4 source existed. Calls were not placed in that 0.2 run. Media on this network should stay IPv4 and the SDP address should be the public Via address, not `100.90.40.193`.
+
 Plivo has discontinued the native Android and iOS SDKs and points integrators at PJSIP and Linphone: <https://plivo.com/docs/voice/client/androidios/overview>. Maven’s latest `com.plivo.endpoint:endpoint` is `3.2.2-beta` (published 2024-10-04). The Android quickstart text says the SDK supports IPv6. The binary we ship does not. There is no newer Android artifact to upgrade to.
 
 ## Recommendation
@@ -76,7 +78,7 @@ Offer PCMU first, PCMA second, and `telephone-event/8000` for RFC 2833 DTMF. Lea
 
 ## Why 3.2.2-beta cannot do this
 
-`Endpoint.login` builds `<sip:user@domain;transport=tls>` and calls resiprocate `SipStack::addTransport` with `IpVersion` 0 (IPv4) and TLS. The app never passes a transport. `newInstance`’s setup map only reads `enableTracking`, `enableQualityTracking`, and `maxAverageBitrate`. There is no public IPv6 or UDP switch. The native library contains `Library was not build w/ required capabilities(probably USE_IPV6 resip/ares mismatch` and `Unparsable V6 address (note, this might be unparsable because IPV6 support is not enabled)`. `networkChange()` retries the same IPv4 bind. Empty interface means “any IPv4 interface”, which an IPv6-only network does not have, so registration fails with `NOT_REGISTERED` and a resip log line (`Can't find source address for Via`, `No transport found`, or the pre-send `makeInitialRequest` snapshot whose Via looks empty because the transport fills it in later).
+`Endpoint.login` builds `<sip:user@domain;transport=tls>` and calls resiprocate `SipStack::addTransport` with `IpVersion` 0 (IPv4) and TLS. The app never passes a transport. `newInstance`’s setup map only reads `enableTracking`, `enableQualityTracking`, and `maxAverageBitrate`. There is no public IPv6 or UDP switch. The native library contains `Library was not build w/ required capabilities(probably USE_IPV6 resip/ares mismatch` and `Unparsable V6 address (note, this might be unparsable because IPV6 support is not enabled)`. `networkChange()` retries the same IPv4 bind. Empty interface means “any IPv4 interface”, which an IPv6-only network does not have, so registration fails with `NOT_REGISTERED` and a resip log line (`Can't find source address for Via`, `No transport found`, or the pre-send `makeInitialRequest` snapshot whose Via looks empty because the transport fills it in later). The Verizon field run above shows the same `NOT_REGISTERED` result is not proof the phone lacked an IPv4 address: CGNAT IPv4 was present and a normal TLS client registered.
 
 ## What stays
 
