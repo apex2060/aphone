@@ -11,6 +11,7 @@ import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -244,16 +245,27 @@ class PhoneService : Service() {
         val cm = getSystemService(ConnectivityManager::class.java)
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                scope.launch { PhoneManager.refreshRegistration("network") }
+                val kind = networkKind(cm, network)
+                scope.launch { PhoneManager.onDefaultNetwork(kind) }
             }
 
             override fun onLost(network: Network) {
-                scope.launch { PhoneManager.refreshRegistration("network") }
+                scope.launch { PhoneManager.onDefaultNetwork("none") }
             }
         }
         runCatching { cm.registerDefaultNetworkCallback(callback) }
             .onSuccess { networkCallback = callback }
             .onFailure { Log.w(TAG, "network callback failed: ${it.javaClass.simpleName}") }
+    }
+
+    private fun networkKind(cm: ConnectivityManager, network: Network): String {
+        val caps = cm.getNetworkCapabilities(network) ?: return "other"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            else -> "other"
+        }
     }
 
     private fun goForeground(notification: android.app.Notification, mic: Boolean) {
