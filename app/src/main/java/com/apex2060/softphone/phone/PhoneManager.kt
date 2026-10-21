@@ -251,7 +251,14 @@ object PhoneManager : EventListener {
     }
 
     private fun markAnswered() {
-        _call.update { it?.copy(phase = CallPhase.ACTIVE, answeredAt = it.answeredAt ?: System.currentTimeMillis()) }
+        var answered = false
+        _call.update {
+            // Plivo fires "connected" from an ICE observer, which can arrive after the call already ended.
+            if (it == null || it.phase == CallPhase.ENDED) return@update it
+            answered = true
+            it.copy(phase = CallPhase.ACTIVE, answeredAt = it.answeredAt ?: System.currentTimeMillis())
+        }
+        if (!answered) return
         app.getSystemService(AudioManager::class.java).mode = AudioManager.MODE_IN_COMMUNICATION
     }
 
