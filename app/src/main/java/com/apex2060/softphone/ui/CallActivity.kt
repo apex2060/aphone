@@ -63,7 +63,9 @@ class CallActivity : ComponentActivity() {
             val call by PhoneManager.call.collectAsState()
             val config by ConfigStore.config.collectAsState()
             val current = call
-            LaunchedEffect(current == null) { if (current == null) finish() }
+            LaunchedEffect(current == null, current?.phase) {
+                if (current == null || current?.phase == CallPhase.ENDED) finish()
+            }
             LaunchedEffect(current?.phase, current?.speaker) { updateProximity(current) }
             SoftphoneTheme(config?.theme ?: ProvisionConfig.DEFAULT_THEME) {
                 if (current != null) CallScreen(current, config?.speedDials.orEmpty()
