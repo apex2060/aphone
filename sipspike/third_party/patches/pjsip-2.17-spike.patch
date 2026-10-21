@@ -1,0 +1,121 @@
+--- a/pjlib/include/pj/addr_resolv.h
++++ b/pjlib/include/pj/addr_resolv.h
+@@ -225,6 +225,19 @@
+  */
+ PJ_DECL(pj_bool_t) pj_check_addr_type(const pj_sockaddr *addr, unsigned type);
+ 
++/**
++ * Pin one hostname to a single address for pj_getaddrinfo().
++ *
++ * While set, a lookup of @a host for the override address family (or
++ * AF_UNSPEC) returns only @a addr. A lookup of the other family fails,
++ * so a dual-stack resolver cannot fall back to IPv4. Pass NULL to clear.
++ *
++ * The 22 SIP Test spike uses this to connect to an AAAA of
++ * mobile.phone.plivo.com while the SIP/TLS name stays phone.plivo.com.
++ */
++PJ_DECL(pj_status_t) pj_set_getaddrinfo_override(const char *host,
++                                                 const pj_sockaddr *addr);
++
+ 
+ /** @} */
+ 
+--- a/pjlib/src/pj/addr_resolv_sock.c
++++ b/pjlib/src/pj/addr_resolv_sock.c
+@@ -22,6 +22,8 @@
+ #include <pj/errno.h>
+ #include <pj/ip_helper.h>
+ #include <pj/compat/socket.h>
++#include <string.h>
++#include <strings.h>
+ 
+ #if defined(PJ_GETADDRINFO_USE_CFHOST) && PJ_GETADDRINFO_USE_CFHOST!=0
+ #   include <CoreFoundation/CFString.h>
+@@ -39,6 +41,41 @@
+ #define THIS_FILE       "addr_resolv_sock.c"
+ #define ANDROID_DNS_TIMEOUT_MS       5000
+ 
++/* Optional single-host override. See pj_set_getaddrinfo_override(). */
++static char         pj_override_host[PJ_MAX_HOSTNAME];
++static pj_sockaddr  pj_override_addr;
++static int          pj_override_on;
++
++PJ_DEF(pj_status_t) pj_set_getaddrinfo_override(const char *host,
++                                                 const pj_sockaddr *addr)
++{
++    if (!host || !host[0] || !addr) {
++        pj_override_on = 0;
++        pj_override_host[0] = '\0';
++        return PJ_SUCCESS;
++    }
++    if (strlen(host) >= sizeof(pj_override_host))
++        return PJ_ENAMETOOLONG;
++
++    memcpy(pj_override_host, host, strlen(host) + 1);
++    pj_memcpy(&pj_override_addr, addr, sizeof(pj_override_addr));
++    pj_override_on = 1;
++    return PJ_SUCCESS;
++}
++
++static int pj_override_host_match(const pj_str_t *nodename)
++{
++    char tmp[PJ_MAX_HOSTNAME];
++
++    if (!pj_override_on || !nodename || !nodename->ptr)
++        return 0;
++    if (nodename->slen <= 0 || nodename->slen >= (int)sizeof(tmp))
++        return 0;
++    memcpy(tmp, nodename->ptr, nodename->slen);
++    tmp[nodename->slen] = '\0';
++    return strcasecmp(tmp, pj_override_host) == 0;
++}
++
+ PJ_DEF(pj_status_t) pj_gethostbyname(const pj_str_t *hostname, pj_hostent *phe)
+ {
+     struct hostent *he;
+@@ -92,6 +129,21 @@
+     PJ_ASSERT_RETURN(af==PJ_AF_INET || af==PJ_AF_INET6 ||
+                      af==PJ_AF_UNSPEC, PJ_EINVAL);
+ 
++    if (pj_override_host_match(nodename)) {
++        int fam = pj_override_addr.addr.sa_family;
++
++        /* The other address family fails so this host cannot fall back. */
++        if (af != PJ_AF_UNSPEC && af != fam)
++            return PJ_ERESOLVE;
++
++        pj_bzero(&ai[0], sizeof(ai[0]));
++        pj_memcpy(&ai[0].ai_addr, &pj_override_addr, sizeof(pj_override_addr));
++        pj_ansi_strxcpy(ai[0].ai_canonname, pj_override_host,
++                        sizeof(ai[0].ai_canonname));
++        *count = 1;
++        return PJ_SUCCESS;
++    }
++
+ #if PJ_WIN32_WINCE
+ 
+     /* Check if nodename is IP address */
+--- a/pjsip-apps/src/swig/java/Makefile
++++ b/pjsip-apps/src/swig/java/Makefile
+@@ -178,14 +178,19 @@
+ 
+ all: $(LIBPJSUA2_SO) java
+ 
+-$(LIBPJSUA2_SO): $(OUT_DIR)/pjsua2_wrap.o
++$(LIBPJSUA2_SO): $(OUT_DIR)/pjsua2_wrap.o $(OUT_DIR)/spike_jni.o
+ ifeq ($(OS),android)
+ 	mkdir -p android/pjsua2/src/main/jniLibs/$(TARGET_ARCH)
+ 	# copy libc++_shared.so manually
+ 	cp -f ${STD_CPP_LIB} android/pjsua2/src/main/jniLibs/$(TARGET_ARCH)
+ endif
+ 	$(PJ_CXX) -shared -o $(LIBPJSUA2_SO) $(OUT_DIR)/pjsua2_wrap.o \
+-		$(MY_LDFLAGS)
++		$(OUT_DIR)/spike_jni.o \
++		$(MY_LDFLAGS) -Wl,-z,max-page-size=16384
++
++# Compiled by sipspike/third_party/build-pjsip-android.sh before this link.
++$(OUT_DIR)/spike_jni.o:
++	@echo "missing $(OUT_DIR)/spike_jni.o — build spike_jni.c first" && exit 1
+ 
+ $(OUT_DIR)/pjsua2_wrap.o: $(OUT_DIR)/pjsua2_wrap.cpp Makefile
+ 	$(PJ_CXX) -c $(OUT_DIR)/pjsua2_wrap.cpp -o $(OUT_DIR)/pjsua2_wrap.o \

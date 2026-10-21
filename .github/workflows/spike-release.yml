@@ -1,0 +1,178 @@
+name: SIP spike APK
+
+on:
+  pull_request:
+    paths:
+      - "sipspike/**"
+      - ".github/workflows/spike-release.yml"
+  push:
+    tags:
+      - "spike-*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test and build the spike debug APK
+        run: |
+          set -euo pipefail
+          ./gradlew -p sipspike --no-daemon testDebugUnitTest assembleDebug
+          python3 sipspike/third_party/check-elf-alignment.py \
+            sipspike/build/outputs/apk/debug/sipspike-debug.apk
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require release signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${ANDROID_KEYSTORE_BASE64}" ] && missing+=("ANDROID_KEYSTORE_BASE64")
+          [ -z "${ANDROID_KEYSTORE_PASSWORD}" ] && missing+=("ANDROID_KEYSTORE_PASSWORD")
+          [ -z "${ANDROID_KEY_ALIAS}" ] && missing+=("ANDROID_KEY_ALIAS")
+          [ -z "${ANDROID_KEY_PASSWORD}" ] && missing+=("ANDROID_KEY_PASSWORD")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Refusing to build the spike APK. Missing repository secret(s): ${missing[*]}."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore="$RUNNER_TEMP/22phone-release.keystore"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$keystore"
+          if [ ! -s "$keystore" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 did not decode to a keystore file."
+            exit 1
+          fi
+          if ! keytool -list -keystore "$keystore" -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" >/dev/null; then
+            echo "::error::Could not unlock the keystore or ANDROID_KEY_ALIAS was not found."
+            exit 1
+          fi
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            spike-*) ;;
+            *)
+              echo "::error::Refusing tag ${tag}. Spike releases use spike-* tags, not v* tags."
+              exit 1
+              ;;
+          esac
+          version_name="${tag#spike-pjsip-v}"
+          if [ "$version_name" = "$tag" ]; then
+            version_name="$tag"
+          fi
+          echo "version_name=${version_name}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=${version_name}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Build signed spike APK
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/22phone-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./gradlew -p sipspike --no-daemon assembleRelease \
+            -PversionName="${VERSION_NAME}" \
+            -PversionCode="${VERSION_CODE}"
+          apk="sipspike/build/outputs/apk/release/sipspike-release.apk"
+          if [ ! -f "$apk" ]; then
+            echo "::error::Signed spike APK was not produced."
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$apk" dist/22siptest.apk
+
+      - name: Verify signature, package, and 16 KB alignment
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          apksigner="$(find "$sdk/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          aapt="$(find "$sdk/build-tools" -type f -name aapt | sort -V | tail -1)"
+          if [ -z "$apksigner" ] || [ -z "$aapt" ]; then
+            echo "::error::apksigner or aapt was not found under ${sdk}."
+            exit 1
+          fi
+          "$apksigner" verify --verbose dist/22siptest.apk
+          certs="$("$apksigner" verify --print-certs dist/22siptest.apk)"
+          printf '%s\n' "$certs"
+          if printf '%s\n' "$certs" | grep -q "CN=Android Debug"; then
+            echo "::error::APK is signed with the Android debug certificate."
+            exit 1
+          fi
+          badging="$("$aapt" dump badging dist/22siptest.apk)"
+          printf '%s\n' "$badging" | grep -E "package:|application-label:"
+          printf '%s\n' "$badging" | grep -F -q "package: name='com.twentytwo.phone.sipspike'"
+          printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
+          printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
+          printf '%s\n' "$badging" | grep -F -q "application-label:'22 SIP Test'"
+          python3 sipspike/third_party/check-elf-alignment.py dist/22siptest.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 22siptest
+          path: dist/22siptest.apk
+          if-no-files-found: error
+
+      - name: Attach APK to a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes=$(printf '%s\n' \
+            "Throwaway 22 SIP Test build. This is not a 22 Phone release." \
+            "" \
+            "- package: com.twentytwo.phone.sipspike" \
+            "- versionName: ${VERSION_NAME}" \
+            "- versionCode: ${VERSION_CODE}" \
+            "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
+            "" \
+            "Install beside 22 Phone. Test steps are in sipspike/README.md." \
+            "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/22siptest.apk --clobber
+          else
+            gh release create "$tag" dist/22siptest.apk \
+              --prerelease \
+              --title "$tag" \
+              --notes "$notes"
+          fi
