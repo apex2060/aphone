@@ -225,8 +225,39 @@ object PhoneManager : EventListener {
     }
 
     private fun markAnswered() {
-        _call.update { it?.copy(phase = CallPhase.ACTIVE, answeredAt = it.answeredAt ?: System.currentTimeMillis()) }
+        var answered = false
+        _call.update {
+            // Plivo fires "connected" from an ICE observer, which can arrive after the call already ended.
+            if (it == null || it.phase == CallPhase.ENDED) return@update it
+            answered = true
+            it.copy(phase = CallPhase.ACTIVE, answeredAt = it.answeredAt ?: System.currentTimeMillis())
+        }
+        if (!answered) return
         app.getSystemService(AudioManager::class.java).mode = AudioManager.MODE_IN_COMMUNICATION
+        deadPolls = 0
+        main.removeCallbacks(watchdog)
+        main.postDelayed(watchdog, WATCHDOG_MS)
+    }
+
+    /**
+     * The Plivo SDK does not always report the end of a call: a normal BYE on an answered incoming call
+     * (SIP 200) sends no callback at all, and its TERMINATE path can throw before notifying us. While a
+     * call is up, poll the SDK's own view and end our call once it has been gone for two checks in a row.
+     */
+    private var deadPolls = 0
+    private val watchdog = object : Runnable {
+        override fun run() {
+            val state = _call.value ?: return
+            if (state.phase != CallPhase.ACTIVE) return
+            val running = runCatching { endpoint?.isCallRunning == true }.getOrDefault(true)
+            deadPolls = if (running) 0 else deadPolls + 1
+            if (deadPolls >= 2) {
+                Log.w(TAG, "call ended without a callback from the SDK")
+                finish(Outcome.COMPLETED, "Call ended")
+                return
+            }
+            main.postDelayed(this, WATCHDOG_MS)
+        }
     }
 
     @Synchronized
@@ -245,6 +276,7 @@ object PhoneManager : EventListener {
         incoming = null
         outgoing = null
         userDeclined = false
+        main.removeCallbacks(watchdog)
         _call.value = state.copy(phase = CallPhase.ENDED, endedLabel = label, outcome = outcome)
 
         val am = app.getSystemService(AudioManager::class.java)
@@ -326,4 +358,5 @@ object PhoneManager : EventListener {
 
     private const val RETRY_MIN_MS = 5_000L
     private const val RETRY_MAX_MS = 5 * 60_000L
+    private const val WATCHDOG_MS = 2_000L
 }

@@ -8,6 +8,8 @@ import android.view.WindowManager
 import android.text.format.DateUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -59,12 +61,19 @@ class CallActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         handleAnswer(intent)
 
+        // Driven from the lifecycle rather than composition: Compose stops recomposing while the screen is
+        // off (proximity sensor, lock screen), which used to leave this screen and its timer up after hangup.
+        lifecycleScope.launch {
+            PhoneManager.call.collect { call ->
+                updateProximity(call)
+                if (call == null) finish()
+            }
+        }
+
         setContent {
             val call by PhoneManager.call.collectAsState()
             val config by ConfigStore.config.collectAsState()
             val current = call
-            LaunchedEffect(current == null) { if (current == null) finish() }
-            LaunchedEffect(current?.phase, current?.speaker) { updateProximity(current) }
             SoftphoneTheme(config?.theme ?: ProvisionConfig.DEFAULT_THEME) {
                 if (current != null) CallScreen(current, config?.speedDials.orEmpty()
                     .associate { PhoneManager.normalize(it.number) to it.label }[current.number])
