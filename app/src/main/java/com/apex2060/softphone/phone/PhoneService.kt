@@ -49,7 +49,15 @@ class PhoneService : Service() {
         }
         scope.launch {
             combine(PhoneManager.registration, PhoneManager.call) { r, c -> r to c }
-                .collect { (reg, call) -> render(reg, call) }
+                .collect { (reg, call) ->
+                    try {
+                        render(reg, call)
+                    } catch (t: Throwable) {
+                        // A thrown notify() used to cancel this collector, so a later hangup never
+                        // cleared the ongoing-call notification.
+                        Log.e(TAG, "render failed: ${t.javaClass.simpleName}: ${t.message}")
+                    }
+                }
         }
         scope.launch {
             while (true) {

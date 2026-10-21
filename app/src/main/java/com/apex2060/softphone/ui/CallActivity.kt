@@ -66,7 +66,7 @@ class CallActivity : ComponentActivity() {
         lifecycleScope.launch {
             PhoneManager.call.collect { call ->
                 updateProximity(call)
-                if (call == null) finish()
+                if (call == null || call.phase == CallPhase.ENDED) finish()
             }
         }
 

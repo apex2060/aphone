@@ -16,6 +16,7 @@ import com.plivo.endpoint.Endpoint
 import com.plivo.endpoint.EventListener
 import com.plivo.endpoint.Incoming
 import com.plivo.endpoint.Outgoing
+import com.plivo.endpoint.SipController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -39,9 +40,15 @@ data class CallState(
 /**
  * Owns the single Plivo [Endpoint] and turns its callbacks into observable state.
  * Plivo calls back on its own threads; everything here is either a StateFlow or posted to main.
+ *
+ * A normal remote BYE is reported to Java as call-state status 200 and does not call
+ * [onOutgoingCallHangup], and it leaves [Outgoing] active. [Endpoint.isCallRunning] stays true,
+ * the in-call UI stays up, and the SDK rejects the next INVITE with 486 while that flag is set.
  */
 object PhoneManager : EventListener {
     private const val TAG = "PhoneManager"
+    private const val ENDED_HOLD_MS = 400L
+    private const val WATCHDOG_MS = 1_000L
 
     private lateinit var app: Context
     private val main = Handler(Looper.getMainLooper())
@@ -56,6 +63,8 @@ object PhoneManager : EventListener {
     private var incoming: Incoming? = null
     private var outgoing: Outgoing? = null
     private var userDeclined = false
+    private var callHookInstalled = false
+    private var sawSignalling = false
 
     private var creds: Pair<String, String>? = null
     private var pendingCreds: Pair<String, String>? = null
@@ -72,7 +81,10 @@ object PhoneManager : EventListener {
     fun login(username: String, password: String) {
         wantOnline = true
         val next = username to password
-        val ep = endpoint ?: Endpoint.newInstance(app, BuildConfig.DEBUG, this).also { endpoint = it }
+        val ep = endpoint ?: Endpoint.newInstance(app, BuildConfig.DEBUG, this).also {
+            endpoint = it
+            installCallHook(it)
+        }
         if (creds == next && _registration.value in setOf(Registration.ONLINE, Registration.CONNECTING)) return
         if (creds != null && creds != next && ep.registered) {
             // Credentials rotated: log out first, onLogout() logs back in with the new pair.
@@ -89,6 +101,7 @@ object PhoneManager : EventListener {
         wantOnline = false
         pendingCreds = null
         main.removeCallbacks(retry)
+        main.removeCallbacks(watchdog)
         endpoint?.let { if (it.registered) it.logout() }
         creds = null
         _registration.value = Registration.OFFLINE
@@ -110,7 +123,7 @@ object PhoneManager : EventListener {
     }
 
     override fun onLogin() {
-        Log.i(TAG, "registered")
+        Log.i(TAG, "registered sdkCallRunning=${sdkCallRunning()}")
         retryDelayMs = RETRY_MIN_MS
         _registration.value = Registration.ONLINE
     }
@@ -148,13 +161,17 @@ object PhoneManager : EventListener {
 
     fun dial(raw: String): Boolean {
         val ep = endpoint ?: return false
-        if (_registration.value != Registration.ONLINE || _call.value != null) return false
+        if (_registration.value != Registration.ONLINE || activeCall() != null) return false
         val number = normalize(raw)
         if (number.isEmpty()) return false
         val out = ep.createOutgoingCall() ?: return false
         outgoing = out
+        sawSignalling = false
         _call.value = CallState(Direction.OUTGOING, number, CallPhase.DIALING)
+        armWatchdog()
+        Log.i(TAG, "dial $number sdkCallRunning=${sdkCallRunning()}")
         if (!out.call(number)) {
+            Log.w(TAG, "dial rejected by SDK for $number")
             finish(Outcome.FAILED, "Call failed")
             return false
         }
@@ -162,32 +179,41 @@ object PhoneManager : EventListener {
     }
 
     fun answer() {
-        val inc = incoming ?: return
+        val inc = incoming ?: run {
+            Log.w(TAG, "answer with no Incoming phase=${_call.value?.phase}")
+            return
+        }
         if (_call.value?.phase != CallPhase.RINGING_IN) return
         inc.answer()
         markAnswered()
     }
 
     fun decline() {
-        val inc = incoming ?: return
+        val state = _call.value ?: return
+        if (state.phase != CallPhase.RINGING_IN) return
         userDeclined = true
-        inc.reject()
+        Log.i(TAG, "decline incoming from=${state.number}")
+        runCatching { incoming?.reject() }
+            .onFailure { Log.w(TAG, "reject failed: ${it.javaClass.simpleName}") }
         finish(Outcome.DECLINED, "Declined")
     }
 
     fun hangup() {
         val state = _call.value ?: return
-        when {
-            state.phase == CallPhase.RINGING_IN -> decline()
-            outgoing != null -> outgoing?.hangup()
-            else -> incoming?.hangup()
+        if (state.phase == CallPhase.ENDED) return
+        if (state.phase == CallPhase.RINGING_IN) {
+            decline()
+            return
         }
-        // Some failure paths never call back; make sure the UI is released.
-        main.postDelayed({
-            if (_call.value != null && _call.value?.phase != CallPhase.ENDED && _call.value?.startedAt == state.startedAt) {
-                finish(if (state.answeredAt != null) Outcome.COMPLETED else Outcome.FAILED, "Call ended")
-            }
-        }, 4000)
+        Log.i(TAG, "local hangup phase=${state.phase} direction=${state.direction} sdkCallRunning=${sdkCallRunning()}")
+        val sent = runCatching { outgoing?.hangup() == true }.getOrDefault(false) ||
+            runCatching { incoming?.hangup() == true }.getOrDefault(false)
+        if (!sent) {
+            runCatching { controller()?.hangup() }
+                .onFailure { Log.w(TAG, "controller hangup failed: ${it.javaClass.simpleName}") }
+        }
+        val answered = state.answeredAt != null
+        finish(if (answered) Outcome.COMPLETED else Outcome.FAILED, "Call ended")
     }
 
     fun toggleMute() {
@@ -234,36 +260,19 @@ object PhoneManager : EventListener {
         }
         if (!answered) return
         app.getSystemService(AudioManager::class.java).mode = AudioManager.MODE_IN_COMMUNICATION
-        deadPolls = 0
-        main.removeCallbacks(watchdog)
-        main.postDelayed(watchdog, WATCHDOG_MS)
     }
 
     /**
-     * The Plivo SDK does not always report the end of a call: a normal BYE on an answered incoming call
-     * (SIP 200) sends no callback at all, and its TERMINATE path can throw before notifying us. While a
-     * call is up, poll the SDK's own view and end our call once it has been gone for two checks in a row.
+     * Records history, drops in-call audio, and clears both the UI call and the SDK's
+     * "call running" flag. Idempotent: a late callback cannot resurrect the call or log it twice.
      */
-    private var deadPolls = 0
-    private val watchdog = object : Runnable {
-        override fun run() {
-            val state = _call.value ?: return
-            if (state.phase != CallPhase.ACTIVE) return
-            val running = runCatching { endpoint?.isCallRunning == true }.getOrDefault(true)
-            deadPolls = if (running) 0 else deadPolls + 1
-            if (deadPolls >= 2) {
-                Log.w(TAG, "call ended without a callback from the SDK")
-                finish(Outcome.COMPLETED, "Call ended")
-                return
-            }
-            main.postDelayed(this, WATCHDOG_MS)
-        }
-    }
-
     @Synchronized
     private fun finish(outcome: Outcome, label: String) {
         val state = _call.value ?: return
         if (state.phase == CallPhase.ENDED) return
+        // Publish ENDED before releasing the SDK. hangup/reset can re-enter this method.
+        _call.value = state.copy(phase = CallPhase.ENDED, endedLabel = label, outcome = outcome)
+        val runningBefore = sdkCallRunning()
         val duration = state.answeredAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
         CallHistory.add(
             number = state.number,
@@ -273,11 +282,19 @@ object PhoneManager : EventListener {
             durationSec = duration,
             limit = ConfigStore.config.value?.historyLimit ?: 200,
         )
+        releaseSdkCall()
+        val runningAfter = sdkCallRunning()
+        Log.i(
+            TAG,
+            "call teardown outcome=$outcome phase=${state.phase} direction=${state.direction} " +
+                "sdkCallRunning=$runningBefore->$runningAfter",
+        )
+        if (runningAfter) Log.w(TAG, "SDK still reports a call running after teardown")
         incoming = null
         outgoing = null
         userDeclined = false
+        sawSignalling = false
         main.removeCallbacks(watchdog)
-        _call.value = state.copy(phase = CallPhase.ENDED, endedLabel = label, outcome = outcome)
 
         val am = app.getSystemService(AudioManager::class.java)
         if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice() else {
@@ -286,63 +303,267 @@ object PhoneManager : EventListener {
         }
         am.mode = AudioManager.MODE_NORMAL
 
-        // Leave "Call ended" on screen briefly, then release the call UI.
-        main.postDelayed({ if (_call.value?.startedAt == state.startedAt) _call.value = null }, 1500)
+        // Hold ENDED only long enough for the missed-call notification to observe it.
+        main.postDelayed({ if (_call.value?.startedAt == state.startedAt) _call.value = null }, ENDED_HOLD_MS)
     }
+
+    /** A call the UI still considers in progress. The brief ENDED hold does not count. */
+    private fun activeCall(): CallState? = _call.value?.takeIf { it.phase != CallPhase.ENDED }
+
+    private fun sdkCallRunning(): Boolean = endpoint?.isCallRunning() == true
 
     // ---- Plivo callbacks: incoming ------------------------------------------------------------
 
-    override fun onIncomingCall(inc: Incoming) {
-        val from = callerOf(inc)
-        if (_call.value != null && _call.value?.phase != CallPhase.ENDED) {
-            // Single-line phone: busy. Log it as missed so the user can call back.
-            inc.reject()
-            CallHistory.add(from, Direction.INCOMING, Outcome.MISSED, System.currentTimeMillis(), 0,
-                ConfigStore.config.value?.historyLimit ?: 200)
+    override fun onIncomingCall(inc: Incoming?) {
+        val phase = _call.value?.phase
+        val running = sdkCallRunning()
+        if (inc == null) {
+            // A SIP INVITE reaches this callback with a null Incoming. localPhase / sdkCallRunning
+            // say whether a leftover call would make the stack reject it busy (486).
+            Log.w(TAG, "onIncomingCall null Incoming localPhase=${phase ?: "none"} sdkCallRunning=$running")
             return
         }
+        val from = callerOf(inc)
+        if (activeCall() != null) {
+            Log.w(TAG, "incoming refused, line busy from=$from localPhase=$phase sdkCallRunning=$running")
+            inc.reject()
+            CallHistory.add(
+                from, Direction.INCOMING, Outcome.MISSED, System.currentTimeMillis(), 0,
+                ConfigStore.config.value?.historyLimit ?: 200,
+            )
+            return
+        }
+        Log.i(TAG, "incoming from=$from sdkCallRunning=$running")
         incoming = inc
         userDeclined = false
+        sawSignalling = false
         _call.value = CallState(Direction.INCOMING, from, CallPhase.RINGING_IN)
+        armWatchdog()
     }
 
-    override fun onIncomingCallConnected(inc: Incoming) = markAnswered()
+    override fun onIncomingCallConnected(inc: Incoming?) = markAnswered()
 
-    override fun onIncomingCallHangup(inc: Incoming) {
-        val answered = _call.value?.answeredAt != null
-        finish(if (answered) Outcome.COMPLETED else Outcome.MISSED, if (answered) "Call ended" else "Missed call")
+    override fun onIncomingCallHangup(inc: Incoming?) {
+        if (_call.value?.direction != Direction.INCOMING) {
+            Log.i(TAG, "incoming hangup ignored, on-screen call is ${_call.value?.direction} ${_call.value?.phase}")
+            return
+        }
+        Log.i(TAG, "incoming hangup")
+        onRemoteEnd()
     }
 
-    override fun onIncomingCallRejected(inc: Incoming) {
+    override fun onIncomingCallRejected(inc: Incoming?) {
+        val state = _call.value
+        if (state != null && state.phase != CallPhase.ENDED && state.direction != Direction.INCOMING && !userDeclined) {
+            // A busy reject for a second invite must not tear down the call already on screen.
+            Log.i(TAG, "incoming rejected while ${state.direction} ${state.phase} is up; leaving that call")
+            return
+        }
+        Log.i(TAG, "incoming rejected local=$userDeclined")
         if (userDeclined) finish(Outcome.DECLINED, "Declined") else finish(Outcome.MISSED, "Missed call")
     }
 
-    override fun onIncomingCallInvalid(inc: Incoming) = finish(Outcome.MISSED, "Missed call")
+    override fun onIncomingCallInvalid(inc: Incoming?) {
+        if (_call.value?.direction != Direction.INCOMING) {
+            Log.i(TAG, "incoming invalid ignored, on-screen call is ${_call.value?.direction}")
+            return
+        }
+        Log.i(TAG, "incoming invalid")
+        finish(Outcome.MISSED, "Missed call")
+    }
 
     private fun callerOf(inc: Incoming): String {
         val raw = inc.fromContact?.takeIf { it.isNotBlank() } ?: inc.fromSip.orEmpty()
-        // "sip:15551234567@phone.plivo.com" -> "15551234567"
-        return raw.removePrefix("sip:").substringBefore('@').ifBlank { "Unknown" }
+        return sipUser(raw) ?: "Unknown"
     }
 
     // ---- Plivo callbacks: outgoing ------------------------------------------------------------
 
-    override fun onOutgoingCall(out: Outgoing) = Unit
+    override fun onOutgoingCall(out: Outgoing?) = Unit
 
-    override fun onOutgoingCallRinging(out: Outgoing) {
+    override fun onOutgoingCallRinging(out: Outgoing?) {
+        Log.i(TAG, "outgoing ringing")
         _call.update { if (it != null && it.phase == CallPhase.DIALING) it.copy(phase = CallPhase.RINGING_OUT) else it }
     }
 
-    override fun onOutgoingCallAnswered(out: Outgoing) = markAnswered()
-
-    override fun onOutgoingCallRejected(out: Outgoing) = finish(Outcome.FAILED, "Call not answered")
-
-    override fun onOutgoingCallHangup(out: Outgoing) {
-        val answered = _call.value?.answeredAt != null
-        finish(if (answered) Outcome.COMPLETED else Outcome.FAILED, if (answered) "Call ended" else "Call not answered")
+    override fun onOutgoingCallAnswered(out: Outgoing?) {
+        Log.i(TAG, "outgoing answered")
+        markAnswered()
     }
 
-    override fun onOutgoingCallInvalid(out: Outgoing) = finish(Outcome.FAILED, "Invalid number")
+    override fun onOutgoingCallRejected(out: Outgoing?) {
+        Log.i(TAG, "outgoing rejected")
+        finish(Outcome.FAILED, "Call not answered")
+    }
+
+    override fun onOutgoingCallHangup(out: Outgoing?) {
+        if (_call.value?.direction != Direction.OUTGOING) {
+            Log.i(TAG, "outgoing hangup ignored, on-screen call is ${_call.value?.direction} ${_call.value?.phase}")
+            return
+        }
+        Log.i(TAG, "outgoing hangup")
+        onRemoteEnd()
+    }
+
+    override fun onOutgoingCallInvalid(out: Outgoing?) {
+        Log.i(TAG, "outgoing invalid")
+        finish(Outcome.FAILED, "Invalid number")
+    }
+
+    private fun onRemoteEnd() {
+        val state = _call.value ?: return
+        if (state.phase == CallPhase.ENDED) return
+        val answered = state.answeredAt != null
+        when {
+            state.direction == Direction.INCOMING && userDeclined -> finish(Outcome.DECLINED, "Declined")
+            state.direction == Direction.INCOMING && !answered -> finish(Outcome.MISSED, "Missed call")
+            answered -> finish(Outcome.COMPLETED, "Call ended")
+            else -> finish(Outcome.FAILED, "Call ended")
+        }
+    }
+
+    // ---- SDK call-event hook ------------------------------------------------------------------
+
+    /**
+     * Native delivers TERMINATE_CALL here. The outgoing branch of the SDK listener calls
+     * getOutgoing().reset() and then the hangup callback; a null outgoing leg throws and the UI
+     * never hears about it. Status 200 never reaches that listener at all.
+     * CallEvent is not visible outside the SDK, so the listener is wrapped by reflection.
+     */
+    private fun installCallHook(ep: Endpoint) {
+        if (callHookInstalled) return
+        val sc = runCatching { SipController.getInstance(ep) }.getOrNull() ?: return
+        val field = runCatching {
+            SipController::class.java.getDeclaredField("onCallEventListener").apply { isAccessible = true }
+        }.getOrElse {
+            Log.e(TAG, "call hook unavailable: ${it.javaClass.simpleName}")
+            return
+        }
+        val existing = field.get(sc)
+        if (existing == null) {
+            Log.e(TAG, "call hook unavailable: SDK listener missing")
+            return
+        }
+        val listenerClass = Class.forName("com.plivo.endpoint.SipController\$OnCallEventListener")
+        var proxy: Any? = null
+        val handler = java.lang.reflect.InvocationHandler { _, method, args ->
+            if (method.declaringClass == Any::class.java) {
+                return@InvocationHandler when (method.name) {
+                    "toString" -> "CallHook"
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "equals" -> args?.getOrNull(0) === proxy
+                    else -> null
+                }
+            }
+            if (method.name == "onCallEvent") {
+                val eventName = (args?.getOrNull(0) as? Enum<*>)?.name
+                val payload = args?.getOrNull(1) as? String
+                try {
+                    onSdkCallEvent(eventName, payload)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "call hook $eventName failed: ${t.javaClass.simpleName}")
+                }
+                try {
+                    method.invoke(existing, *(args ?: emptyArray()))
+                } catch (t: Throwable) {
+                    val cause = (t as? java.lang.reflect.InvocationTargetException)?.cause ?: t
+                    Log.e(TAG, "sdk call listener $eventName threw ${cause.javaClass.simpleName}")
+                }
+            }
+            null
+        }
+        proxy = java.lang.reflect.Proxy.newProxyInstance(listenerClass.classLoader, arrayOf(listenerClass), handler)
+        field.set(sc, proxy)
+        callHookInstalled = true
+        Log.i(TAG, "call hook installed")
+    }
+
+    private fun onSdkCallEvent(eventName: String?, payload: String?) {
+        when (eventName) {
+            "INCOMING_CALL" -> {
+                val info = describeInvite(payload)
+                val phase = _call.value?.phase
+                val running = sdkCallRunning()
+                Log.i(TAG, "INVITE received ${info.summary()} localPhase=${phase ?: "none"} sdkCallRunning=$running")
+                if (phase != null && phase != CallPhase.ENDED) {
+                    Log.w(TAG, "INVITE while a call is still $phase; it can be rejected busy/486 until that call is cleared")
+                }
+            }
+            "TERMINATE_CALL" -> {
+                Log.i(TAG, "TERMINATE_CALL ${summarizeSignal(payload)} localPhase=${_call.value?.phase} sdkCallRunning=${sdkCallRunning()}")
+                main.post { onRemoteEnd() }
+            }
+        }
+    }
+
+    private val watchdog = object : Runnable {
+        override fun run() {
+            val state = _call.value ?: return
+            val phase = state.phase
+            if (phase == CallPhase.ENDED) return
+            val stats = signallingPresent()
+            if (stats == true) sawSignalling = true
+            val outActive = outgoingActive()
+            // Status 200 nulls signalling and returns without a hangup callback, leaving
+            // Outgoing active so the next INVITE is busy. RINGING_IN has neither signal.
+            val dropped = phase != CallPhase.RINGING_IN &&
+                (outActive == false || (sawSignalling && stats == false))
+            if (dropped) {
+                Log.w(
+                    TAG,
+                    "watchdog teardown phase=$phase outgoingActive=$outActive signalling=$stats sdkCallRunning=${sdkCallRunning()}",
+                )
+                onRemoteEnd()
+                return
+            }
+            main.postDelayed(this, WATCHDOG_MS)
+        }
+    }
+
+    private fun armWatchdog() {
+        main.removeCallbacks(watchdog)
+        main.postDelayed(watchdog, WATCHDOG_MS)
+    }
+
+    private fun releaseSdkCall() {
+        val reset = runCatching {
+            Class.forName("com.plivo.endpoint.IO").getDeclaredMethod("reset").apply { isAccessible = true }
+        }.getOrNull()
+        if (reset != null) {
+            outgoing?.let { runCatching { reset.invoke(it) } }
+            incoming?.let { runCatching { reset.invoke(it) } }
+        }
+        // endCall even when the Java leg never went inactive. Native rejects a new INVITE
+        // with 486 while it still has that session.
+        runCatching { controller()?.hangup() }
+            .onFailure { Log.w(TAG, "session release failed: ${it.javaClass.simpleName}") }
+        main.post {
+            val sc = controller() ?: return@post
+            runCatching {
+                SipController::class.java.getDeclaredField("incoming").apply { isAccessible = true }.set(sc, null)
+                SipController::class.java.getDeclaredField("isIncomingCall").apply { isAccessible = true }
+                    .set(sc, java.lang.Boolean.FALSE)
+            }
+        }
+    }
+
+    private fun controller(): SipController? =
+        endpoint?.let { runCatching { SipController.getInstance(it) }.getOrNull() }
+
+    private fun signallingPresent(): Boolean? {
+        val sc = controller() ?: return null
+        return runCatching {
+            SipController::class.java.getDeclaredField("signallingStats").apply { isAccessible = true }.get(sc) != null
+        }.getOrNull()
+    }
+
+    private fun outgoingActive(): Boolean? {
+        val out = outgoing ?: return null
+        return runCatching {
+            Class.forName("com.plivo.endpoint.IO").getDeclaredMethod("isActive").apply { isAccessible = true }
+                .invoke(out) as Boolean
+        }.getOrNull()
+    }
 
     // ---- Plivo callbacks: misc ----------------------------------------------------------------
 
@@ -358,5 +579,51 @@ object PhoneManager : EventListener {
 
     private const val RETRY_MIN_MS = 5_000L
     private const val RETRY_MAX_MS = 5 * 60_000L
-    private const val WATCHDOG_MS = 2_000L
+}
+
+private data class InviteInfo(
+    val fromUser: String?,
+    val callId: String?,
+    val cseq: String?,
+) {
+    fun summary(): String = "callId=${callId ?: "?"} from=${fromUser ?: "unknown"} cseq=${cseq ?: "?"}"
+}
+
+/** Caller, Call-ID, and CSeq only. Authorization and password headers are dropped. */
+private fun describeInvite(raw: String?): InviteInfo {
+    val headers = HashMap<String, String>()
+    for (line in raw.orEmpty().split('\n')) {
+        val trimmed = line.trim().trimEnd('\r')
+        val idx = trimmed.indexOf(':')
+        if (idx <= 0) continue
+        val name = trimmed.substring(0, idx).trim().lowercase()
+        if (name == "authorization" || name == "proxy-authorization" || name == "www-authenticate") continue
+        if ("password" in name) continue
+        if (name !in headers) headers[name] = trimmed.substring(idx + 1).trim()
+    }
+    val from = headers["p-asserted-identity"] ?: headers["from"] ?: headers["remote-party-id"]
+    val callId = headers["call-id"] ?: headers["i"]
+    return InviteInfo(
+        fromUser = sipUser(from),
+        callId = callId?.substringBefore(';')?.trim()?.take(80),
+        cseq = headers["cseq"]?.take(40),
+    )
+}
+
+private fun summarizeSignal(raw: String?): String {
+    val text = raw.orEmpty()
+    if (text.contains("From:", ignoreCase = true) || text.contains("Call-ID", ignoreCase = true)) {
+        return describeInvite(text).summary()
+    }
+    val cleaned = text.replace(Regex("(?i)(password|authorization)\\s*[=:]\\s*\\S+"), "$1=<redacted>")
+    return cleaned.take(160).ifBlank { "no-detail" }
+}
+
+private fun sipUser(value: String?): String? {
+    if (value.isNullOrBlank()) return null
+    val body = value.substringAfter('<', value).substringBefore('>').trim()
+    val user = body.removePrefix("sip:").removePrefix("sips:").removePrefix("tel:")
+        .substringBefore('@').substringBefore(';').trim().trim('"')
+    if (user.isBlank() || user.any { it.isWhitespace() } || user.length > 64) return null
+    return user
 }
