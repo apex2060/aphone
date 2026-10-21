@@ -134,12 +134,12 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
-    val reg by PhoneManager.registration.collectAsState()
+    val line by PhoneManager.lineStatus.collectAsState()
     var showLine by remember { mutableStateOf(false) }
-    val (dot, label) = when (reg) {
+    val (dot, label) = when (line.registration) {
         Registration.ONLINE -> LocalCallColors.current.accept to "Ready"
         Registration.CONNECTING -> MaterialTheme.colorScheme.onSurfaceVariant to "Connecting…"
-        Registration.FAILED -> LocalCallColors.current.decline to "Offline, retrying"
+        Registration.FAILED -> LocalCallColors.current.decline to failureLabel(line.lastRegisterResult)
         Registration.OFFLINE -> LocalCallColors.current.decline to "Offline"
     }
     Column(
@@ -165,6 +165,8 @@ private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
                 listOfNotNull(config.subtitle, label).joinToString(" · "),
                 color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             Text(
@@ -196,13 +198,20 @@ private fun LineStatusDialog(onDismiss: () -> Unit) {
                 StatusLine("SDK registered", if (line.sdkRegistered) "yes" else "no")
                 StatusLine("Expiry", if (line.regTimeoutSec > 0) "${line.regTimeoutSec}s" else "—")
                 StatusLine("Username", line.username ?: "—")
-                StatusLine("Last REGISTER", "${line.lastRegisterResult} · ${ago(line.lastRegisterAt)}")
+                StatusLine("Last login", line.lastRegisterResult)
+                StatusLine("Login started", stamp(context, line.loginAttemptAt))
+                StatusLine("Login result at", stamp(context, line.lastRegisterAt))
+                StatusLine("SDK reason", line.lastSdkReason ?: "none")
+                StatusLine(
+                    "Last call",
+                    if (line.lastCallAt == null) line.lastCallResult else "${line.lastCallResult} · ${stamp(context, line.lastCallAt)}",
+                )
                 StatusLine(
                     "Last refresh",
-                    listOfNotNull(line.lastRefreshReason, ago(line.lastRefreshAt).takeIf { line.lastRefreshAt != null })
+                    listOfNotNull(line.lastRefreshReason, stamp(context, line.lastRefreshAt).takeIf { line.lastRefreshAt != null })
                         .joinToString(" · ").ifBlank { "none" },
                 )
-                StatusLine("Last invite", ago(line.lastInviteAt))
+                StatusLine("Last invite", stamp(context, line.lastInviteAt))
                 StatusLine("Invite from", line.lastInviteFrom ?: "none yet")
                 StatusLine("Invite Call-ID", line.lastInviteCallId ?: "—")
                 StatusLine("Notifications", if (notifications) "allowed" else "denied")
@@ -262,11 +271,30 @@ private fun registrationLabel(line: LineStatus): String = when (line.registratio
     Registration.OFFLINE -> "Offline"
 }
 
+private fun failureLabel(result: String): String = when {
+    result == "timeout" || result.startsWith("timeout") -> "Timed out, retrying"
+    result.startsWith("failed:") -> {
+        val reason = result.removePrefix("failed:").substringBefore(" (").take(28)
+        if (reason.isBlank() || reason == "no-reason") "Failed, retrying" else "Failed ($reason), retrying"
+    }
+    else -> "Failed, retrying"
+}
+
 private fun ago(at: Long?): String {
     if (at == null) return "none"
     return DateUtils.getRelativeTimeSpanString(
         at, System.currentTimeMillis(), DateUtils.SECOND_IN_MILLIS,
     ).toString()
+}
+
+private fun stamp(context: android.content.Context, at: Long?): String {
+    if (at == null) return "none"
+    val clock = DateUtils.formatDateTime(
+        context,
+        at,
+        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_ALL,
+    )
+    return "$clock · ${ago(at)}"
 }
 
 private val KEYS = listOf(
@@ -280,7 +308,7 @@ private val KEYS = listOf(
 @Composable
 private fun Keypad(onDial: (String) -> Unit) {
     var number by remember { mutableStateOf("") }
-    val reg by PhoneManager.registration.collectAsState()
+    val line by PhoneManager.lineStatus.collectAsState()
     Column(
         Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -303,7 +331,8 @@ private fun Keypad(onDial: (String) -> Unit) {
             Spacer(Modifier.size(64.dp))
             RoundButton(
                 R.drawable.ic_call, LocalCallColors.current.accept, size = 72,
-                enabled = reg == Registration.ONLINE && number.isNotEmpty(),
+                enabled = number.isNotEmpty() &&
+                    (line.registration == Registration.ONLINE || line.sdkRegistered),
             ) { onDial(number) }
             Box(
                 Modifier.size(64.dp).clip(CircleShape)
