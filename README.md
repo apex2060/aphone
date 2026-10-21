@@ -8,6 +8,8 @@ with Plivo, and becomes a dialer that makes calls, rings for incoming calls, and
   [docs/PROVISIONING.md](docs/PROVISIONING.md) for the schema and [server/](server/) for a
   zero-dependency sample endpoint.
 * **Calling:** Plivo Android SDK (`com.plivo.endpoint:endpoint`) logged in with endpoint credentials.
+  v1.0.5 is IPv4-only on cellular. A replacement plan, with no code yet, is in
+  [docs/IPV6_SIP_STACK.md](docs/IPV6_SIP_STACK.md).
 * **Incoming calls:** a foreground service keeps the registration open, posts a full-screen
   ringing notification with Answer and Decline, and logs missed calls.
 * **History:** a local SQLite log of incoming, outgoing, missed and declined calls, with tap to call back.
