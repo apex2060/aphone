@@ -25,6 +25,21 @@ enum class Registration { OFFLINE, CONNECTING, ONLINE, FAILED }
 
 enum class CallPhase { RINGING_IN, DIALING, RINGING_OUT, ACTIVE, ENDED }
 
+/** What the owner can read on the phone. Never includes the SIP password or provisioning key. */
+data class LineStatus(
+    val registration: Registration = Registration.OFFLINE,
+    val sdkRegistered: Boolean = false,
+    val regTimeoutSec: Int = 0,
+    val username: String? = null,
+    val lastRegisterResult: String = "none",
+    val lastRegisterAt: Long? = null,
+    val lastRefreshReason: String? = null,
+    val lastRefreshAt: Long? = null,
+    val lastInviteAt: Long? = null,
+    val lastInviteFrom: String? = null,
+    val lastInviteCallId: String? = null,
+)
+
 data class CallState(
     val direction: Direction,
     val number: String,
@@ -50,11 +65,18 @@ object PhoneManager : EventListener {
     private const val ENDED_HOLD_MS = 400L
     private const val WATCHDOG_MS = 1_000L
 
+    /** Shortest expiry the SDK accepts. A 30-day REGISTER lets NAT drop inbound INVITEs. */
+    private const val REG_TIMEOUT_SEC = 120
+    private const val REFRESH_DEBOUNCE_MS = 15_000L
+
     private lateinit var app: Context
     private val main = Handler(Looper.getMainLooper())
 
     private val _registration = MutableStateFlow(Registration.OFFLINE)
     val registration: StateFlow<Registration> = _registration
+
+    private val _lineStatus = MutableStateFlow(LineStatus())
+    val lineStatus: StateFlow<LineStatus> = _lineStatus
 
     private val _call = MutableStateFlow<CallState?>(null)
     val call: StateFlow<CallState?> = _call
@@ -70,9 +92,33 @@ object PhoneManager : EventListener {
     private var pendingCreds: Pair<String, String>? = null
     private var wantOnline = false
     private var retryDelayMs = RETRY_MIN_MS
+    private var lastRegisterResult = "none"
+    private var lastRegisterAt: Long? = null
+    private var lastRefreshReason: String? = null
+    private var lastRefreshAt: Long? = null
+    private var lastRefreshAtMs = 0L
+    private var lastInviteAt: Long? = null
+    private var lastInviteFrom: String? = null
+    private var lastInviteCallId: String? = null
+
+    @Volatile private var foregroundActivities = 0
 
     fun init(context: Context) {
         app = context.applicationContext
+    }
+
+    /** MainActivity and CallActivity. The service uses this to decide if it can open the call screen. */
+    fun onActivityStarted() { foregroundActivities++ }
+
+    fun onActivityStopped() { if (foregroundActivities > 0) foregroundActivities-- }
+
+    fun isAppForeground(): Boolean = foregroundActivities > 0
+
+    /** Safe to log. Username only — never the SIP password. */
+    fun registrationSnapshot(): String {
+        val ep = endpoint
+        return "state=${_registration.value} sdkRegistered=${ep?.registered == true} " +
+            "regTimeout=${ep?.registrationTimeout ?: 0}s user=${creds?.first ?: "-"} lastRegister=$lastRegisterResult"
     }
 
     // ---- registration -------------------------------------------------------------------------
@@ -85,7 +131,11 @@ object PhoneManager : EventListener {
             endpoint = it
             installCallHook(it)
         }
-        if (creds == next && _registration.value in setOf(Registration.ONLINE, Registration.CONNECTING)) return
+        applyRegTimeout(ep)
+        if (creds == next && _registration.value in setOf(Registration.ONLINE, Registration.CONNECTING)) {
+            publishLine()
+            return
+        }
         if (creds != null && creds != next && ep.registered) {
             // Credentials rotated: log out first, onLogout() logs back in with the new pair.
             pendingCreds = next
@@ -94,7 +144,45 @@ object PhoneManager : EventListener {
         }
         creds = next
         _registration.value = Registration.CONNECTING
-        if (!ep.login(username, password)) scheduleRetry()
+        publishLine()
+        Log.i(TAG, "login user=$username regTimeout=${ep.registrationTimeout}s")
+        if (!ep.login(username, password)) scheduleRetry() else lastRefreshAtMs = System.currentTimeMillis()
+    }
+
+    /**
+     * Re-bind the contact so an inbound INVITE still has somewhere to land.
+     * [reason] is `resume`, `network`, or `timer`. No-op during a call.
+     */
+    fun refreshRegistration(reason: String) {
+        val ep = endpoint ?: return
+        if (!wantOnline) return
+        val now = System.currentTimeMillis()
+        if (now - lastRefreshAtMs < REFRESH_DEBOUNCE_MS) return
+        applyRegTimeout(ep)
+        if (activeCall() != null) {
+            Log.i(TAG, "registration refresh skipped reason=$reason phase=${_call.value?.phase}")
+            return
+        }
+        lastRefreshAtMs = now
+        lastRefreshReason = reason
+        lastRefreshAt = now
+        Log.i(TAG, "registration refresh reason=$reason ${registrationSnapshot()}")
+        if (!ep.registered || _registration.value != Registration.ONLINE) {
+            val c = creds ?: return
+            _registration.value = Registration.CONNECTING
+            publishLine()
+            if (!ep.login(c.first, c.second)) scheduleRetry()
+        } else {
+            runCatching { ep.networkChange() }
+                .onFailure { Log.w(TAG, "networkChange failed: ${it.javaClass.simpleName}") }
+            publishLine()
+        }
+    }
+
+    private fun applyRegTimeout(ep: Endpoint) {
+        ep.setRegTimeout(REG_TIMEOUT_SEC)
+        runCatching { SipController.getInstance(ep).registerTimeOut(REG_TIMEOUT_SEC) }
+            .onFailure { Log.w(TAG, "registerTimeOut failed: ${it.javaClass.simpleName}") }
     }
 
     fun logout() {
@@ -104,33 +192,61 @@ object PhoneManager : EventListener {
         main.removeCallbacks(watchdog)
         endpoint?.let { if (it.registered) it.logout() }
         creds = null
+        lastRegisterResult = "logged-out"
         _registration.value = Registration.OFFLINE
+        publishLine()
     }
 
     private val retry = Runnable {
         val c = creds ?: return@Runnable
         if (wantOnline && _registration.value != Registration.ONLINE) {
+            endpoint?.let { applyRegTimeout(it) }
             _registration.value = Registration.CONNECTING
-            if (endpoint?.login(c.first, c.second) != true) scheduleRetry()
+            publishLine()
+            Log.i(TAG, "login retry user=${c.first} regTimeout=${endpoint?.registrationTimeout ?: 0}s")
+            if (endpoint?.login(c.first, c.second) == true) lastRefreshAtMs = System.currentTimeMillis() else scheduleRetry()
         }
     }
 
     private fun scheduleRetry() {
         _registration.value = Registration.FAILED
+        publishLine()
         main.removeCallbacks(retry)
         main.postDelayed(retry, retryDelayMs)
         retryDelayMs = (retryDelayMs * 2).coerceAtMost(RETRY_MAX_MS)
     }
 
+    private fun publishLine() {
+        val ep = endpoint
+        _lineStatus.value = LineStatus(
+            registration = _registration.value,
+            sdkRegistered = ep?.registered == true,
+            regTimeoutSec = ep?.registrationTimeout ?: 0,
+            username = creds?.first,
+            lastRegisterResult = lastRegisterResult,
+            lastRegisterAt = lastRegisterAt,
+            lastRefreshReason = lastRefreshReason,
+            lastRefreshAt = lastRefreshAt,
+            lastInviteAt = lastInviteAt,
+            lastInviteFrom = lastInviteFrom,
+            lastInviteCallId = lastInviteCallId,
+        )
+    }
+
     override fun onLogin() {
-        Log.i(TAG, "registered sdkCallRunning=${sdkCallRunning()}")
+        lastRegisterResult = "ok"
+        lastRegisterAt = System.currentTimeMillis()
         retryDelayMs = RETRY_MIN_MS
         _registration.value = Registration.ONLINE
+        publishLine()
+        Log.i(TAG, "registered ${registrationSnapshot()}")
     }
 
     override fun onLogout() {
         Log.i(TAG, "logged out")
+        lastRegisterResult = "logged-out"
         _registration.value = Registration.OFFLINE
+        publishLine()
         val next = pendingCreds ?: return
         pendingCreds = null
         creds = null
@@ -140,8 +256,13 @@ object PhoneManager : EventListener {
     override fun onLoginFailed() = onLoginFailed("unknown")
 
     override fun onLoginFailed(reason: String?) {
-        Log.w(TAG, "login failed: $reason")
-        main.post { if (wantOnline) scheduleRetry() }
+        lastRegisterResult = "failed:${reason ?: "unknown"}"
+        lastRegisterAt = System.currentTimeMillis()
+        Log.w(TAG, "login failed: ${reason ?: "unknown"} user=${creds?.first ?: "-"}")
+        main.post {
+            publishLine()
+            if (wantOnline) scheduleRetry()
+        }
     }
 
     // ---- calls --------------------------------------------------------------------------------
@@ -179,12 +300,14 @@ object PhoneManager : EventListener {
     }
 
     fun answer() {
-        val inc = incoming ?: run {
-            Log.w(TAG, "answer with no Incoming phase=${_call.value?.phase}")
-            return
-        }
         if (_call.value?.phase != CallPhase.RINGING_IN) return
-        inc.answer()
+        Log.i(TAG, "answer incoming from=${_call.value?.number}")
+        val answered = runCatching { incoming?.answer() == true }.getOrDefault(false)
+        if (!answered) {
+            Log.w(TAG, "Incoming.answer unavailable, using SipController.doAnswer")
+            runCatching { controller()?.doAnswer() }
+                .onFailure { Log.e(TAG, "doAnswer failed: ${it.javaClass.simpleName}") }
+        }
         markAnswered()
     }
 
@@ -193,8 +316,11 @@ object PhoneManager : EventListener {
         if (state.phase != CallPhase.RINGING_IN) return
         userDeclined = true
         Log.i(TAG, "decline incoming from=${state.number}")
-        runCatching { incoming?.reject() }
-            .onFailure { Log.w(TAG, "reject failed: ${it.javaClass.simpleName}") }
+        val rejected = runCatching { incoming?.reject() == true }.getOrDefault(false)
+        if (!rejected) {
+            runCatching { controller()?.reject() }
+                .onFailure { Log.w(TAG, "reject failed: ${it.javaClass.simpleName}") }
+        }
         finish(Outcome.DECLINED, "Declined")
     }
 
@@ -318,13 +444,19 @@ object PhoneManager : EventListener {
         val phase = _call.value?.phase
         val running = sdkCallRunning()
         if (inc == null) {
-            // A SIP INVITE reaches this callback with a null Incoming. localPhase / sdkCallRunning
-            // say whether a leftover call would make the stack reject it busy (486).
+            // The SDK calls this with a null Incoming for a live SIP INVITE. Status 180 still
+            // means the session is ringing; start the UI here when the call hook did not.
             Log.w(TAG, "onIncomingCall null Incoming localPhase=${phase ?: "none"} sdkCallRunning=$running")
+            if (activeCall() == null) {
+                val recent = lastInviteAt != null && System.currentTimeMillis() - lastInviteAt!! < 5_000
+                val number = if (recent) lastInviteFrom ?: "Unknown" else "Unknown"
+                Log.i(TAG, "onIncomingCall null Incoming; showing ring from=$number")
+                main.post { showIncoming(number, null) }
+            }
             return
         }
         val from = callerOf(inc)
-        if (activeCall() != null) {
+        if (activeCall() != null && _call.value?.phase != CallPhase.RINGING_IN) {
             Log.w(TAG, "incoming refused, line busy from=$from localPhase=$phase sdkCallRunning=$running")
             inc.reject()
             CallHistory.add(
@@ -333,12 +465,8 @@ object PhoneManager : EventListener {
             )
             return
         }
-        Log.i(TAG, "incoming from=$from sdkCallRunning=$running")
-        incoming = inc
-        userDeclined = false
-        sawSignalling = false
-        _call.value = CallState(Direction.INCOMING, from, CallPhase.RINGING_IN)
-        armWatchdog()
+        Log.i(TAG, "onIncomingCall from=$from sdkCallRunning=$running")
+        main.post { showIncoming(from, inc) }
     }
 
     override fun onIncomingCallConnected(inc: Incoming?) = markAnswered()
@@ -375,6 +503,20 @@ object PhoneManager : EventListener {
     private fun callerOf(inc: Incoming): String {
         val raw = inc.fromContact?.takeIf { it.isNotBlank() } ?: inc.fromSip.orEmpty()
         return sipUser(raw) ?: "Unknown"
+    }
+
+    private fun showIncoming(number: String, inc: Incoming?) {
+        if (_call.value?.phase == CallPhase.RINGING_IN) {
+            if (inc != null) incoming = inc
+            return
+        }
+        if (activeCall() != null) return
+        incoming = inc
+        userDeclined = false
+        sawSignalling = false
+        _call.value = CallState(Direction.INCOMING, number.ifBlank { "Unknown" }, CallPhase.RINGING_IN)
+        armWatchdog()
+        Log.i(TAG, "incoming call shown from=$number ${registrationSnapshot()}")
     }
 
     // ---- Plivo callbacks: outgoing ------------------------------------------------------------
@@ -484,10 +626,33 @@ object PhoneManager : EventListener {
                 val info = describeInvite(payload)
                 val phase = _call.value?.phase
                 val running = sdkCallRunning()
-                Log.i(TAG, "INVITE received ${info.summary()} localPhase=${phase ?: "none"} sdkCallRunning=$running")
-                if (phase != null && phase != CallPhase.ENDED) {
-                    Log.w(TAG, "INVITE while a call is still $phase; it can be rejected busy/486 until that call is cleared")
+                lastInviteAt = System.currentTimeMillis()
+                lastInviteFrom = info.fromUser ?: "unknown"
+                lastInviteCallId = info.callId
+                main.post { publishLine() }
+                Log.i(
+                    TAG,
+                    "INVITE received ${info.summary()} localPhase=${phase ?: "none"} " +
+                        "sdkCallRunning=$running ${registrationSnapshot()}",
+                )
+                if (phase != null && phase != CallPhase.ENDED && phase != CallPhase.RINGING_IN) {
+                    Log.w(TAG, "INVITE while a call is still $phase; rejecting busy")
+                    runCatching { controller()?.reject() }
+                    val from = info.fromUser ?: "Unknown"
+                    main.post {
+                        CallHistory.add(
+                            from, Direction.INCOMING, Outcome.MISSED, System.currentTimeMillis(), 0,
+                            ConfigStore.config.value?.historyLimit ?: 200,
+                        )
+                    }
+                    return
                 }
+                // The SDK only builds Incoming for a push relay. Attach one so answer/reject
+                // reach the native session that is already handling this INVITE. Set the ring
+                // before returning: the 180 that follows calls onIncomingCall on this same thread.
+                val inc = bindIncoming(info)
+                val number = info.fromUser ?: "Unknown"
+                showIncoming(number, inc)
             }
             "TERMINATE_CALL" -> {
                 Log.i(TAG, "TERMINATE_CALL ${summarizeSignal(payload)} localPhase=${_call.value?.phase} sdkCallRunning=${sdkCallRunning()}")
@@ -547,6 +712,40 @@ object PhoneManager : EventListener {
         }
     }
 
+    /**
+     * The SDK constructs [Incoming] only inside relayVoipPushNotification. A live INVITE still
+     * reaches native, which then calls onIncomingCall with whatever is in this field — null,
+     * unless we put a call here first. Answer and reject both forward to the native session.
+     * [from] is the caller user as received, digits with no leading '+' when that is what Plivo sent.
+     */
+    private fun bindIncoming(info: InviteInfo): Incoming? {
+        val sc = controller()
+        if (sc == null) {
+            Log.e(TAG, "bind Incoming skipped, no SipController")
+            return null
+        }
+        val fromHeader = info.fromHeader?.takeIf { it.isNotBlank() }
+            ?: info.fromUser?.let { "sip:$it" }
+            ?: "sip:unknown"
+        val stir = info.headers["x-plivo-stir-verification"] ?: "Not applicable"
+        return runCatching {
+            val inc = Incoming(fromHeader, "", java.util.HashMap(info.headers), stir, sc)
+            info.callId?.let { id ->
+                runCatching {
+                    Class.forName("com.plivo.endpoint.IO").getDeclaredField("callId")
+                        .apply { isAccessible = true }
+                        .set(inc, id)
+                }
+            }
+            SipController::class.java.getDeclaredField("incoming").apply { isAccessible = true }.set(sc, inc)
+            Log.i(TAG, "bound Incoming from=${info.fromUser ?: "unknown"} callId=${info.callId ?: "?"}")
+            inc
+        }.getOrElse {
+            Log.e(TAG, "bind Incoming failed: ${it.javaClass.simpleName}")
+            null
+        }
+    }
+
     private fun controller(): SipController? =
         endpoint?.let { runCatching { SipController.getInstance(it) }.getOrNull() }
 
@@ -583,11 +782,18 @@ object PhoneManager : EventListener {
 
 private data class InviteInfo(
     val fromUser: String?,
+    val fromHeader: String?,
     val callId: String?,
     val cseq: String?,
+    val headers: HashMap<String, String>,
 ) {
     fun summary(): String = "callId=${callId ?: "?"} from=${fromUser ?: "unknown"} cseq=${cseq ?: "?"}"
 }
+
+private val INVITE_HEADERS = setOf(
+    "from", "to", "call-id", "i", "cseq", "contact",
+    "p-asserted-identity", "remote-party-id", "x-plivo-stir-verification",
+)
 
 /** Caller, Call-ID, and CSeq only. Authorization and password headers are dropped. */
 private fun describeInvite(raw: String?): InviteInfo {
@@ -599,14 +805,18 @@ private fun describeInvite(raw: String?): InviteInfo {
         val name = trimmed.substring(0, idx).trim().lowercase()
         if (name == "authorization" || name == "proxy-authorization" || name == "www-authenticate") continue
         if ("password" in name) continue
-        if (name !in headers) headers[name] = trimmed.substring(idx + 1).trim()
+        if (name !in INVITE_HEADERS || name in headers) continue
+        headers[name] = trimmed.substring(idx + 1).trim().take(180)
     }
+    // Plivo Dial callerId is the original caller, often digits with no leading '+'.
     val from = headers["p-asserted-identity"] ?: headers["from"] ?: headers["remote-party-id"]
     val callId = headers["call-id"] ?: headers["i"]
     return InviteInfo(
         fromUser = sipUser(from),
+        fromHeader = from?.take(180),
         callId = callId?.substringBefore(';')?.trim()?.take(80),
         cseq = headers["cseq"]?.take(40),
+        headers = headers,
     )
 }
 
@@ -623,7 +833,7 @@ private fun sipUser(value: String?): String? {
     if (value.isNullOrBlank()) return null
     val body = value.substringAfter('<', value).substringBefore('>').trim()
     val user = body.removePrefix("sip:").removePrefix("sips:").removePrefix("tel:")
-        .substringBefore('@').substringBefore(';').trim().trim('"')
+        .substringBefore('@').substringBefore(';').substringBefore(':').trim().trim('"')
     if (user.isBlank() || user.any { it.isWhitespace() } || user.length > 64) return null
     return user
 }

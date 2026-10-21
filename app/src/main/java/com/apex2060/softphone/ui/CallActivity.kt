@@ -81,9 +81,19 @@ class CallActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        PhoneManager.onActivityStarted()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleAnswer(intent)
+    }
+
+    override fun onStop() {
+        PhoneManager.onActivityStopped()
+        super.onStop()
     }
 
     override fun onDestroy() {

@@ -1,5 +1,9 @@
 package com.apex2060.softphone.ui
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.text.format.DateUtils
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -15,11 +19,14 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -61,6 +68,8 @@ import com.apex2060.softphone.history.CallRecord
 import com.apex2060.softphone.history.Direction
 import com.apex2060.softphone.history.Outcome
 import com.apex2060.softphone.phone.CallPhase
+import com.apex2060.softphone.phone.LineStatus
+import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneManager
 import com.apex2060.softphone.phone.PhoneService
 import com.apex2060.softphone.phone.Registration
@@ -126,6 +135,7 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
 @Composable
 private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
     val reg by PhoneManager.registration.collectAsState()
+    var showLine by remember { mutableStateOf(false) }
     val (dot, label) = when (reg) {
         Registration.ONLINE -> LocalCallColors.current.accept to "Ready"
         Registration.CONNECTING -> MaterialTheme.colorScheme.onSurfaceVariant to "Connecting…"
@@ -136,25 +146,127 @@ private fun Header(config: ProvisionConfig, onLongPress: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.primary)
-            // Hidden admin gesture: long-press the title bar to reset the phone.
-            .combinedClickable(onClick = {}, onLongClick = onLongPress)
             .padding(horizontal = 20.dp, vertical = 16.dp)
     ) {
         Text(
             config.title, color = MaterialTheme.colorScheme.onPrimary,
             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
+            // Hidden admin gesture: long-press the title to reset the phone.
+            modifier = Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress),
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().clickable { showLine = true }.padding(top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
             Spacer(Modifier.width(6.dp))
             Text(
                 listOfNotNull(config.subtitle, label).joinToString(" · "),
                 color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "Details",
+                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
+                style = MaterialTheme.typography.bodySmall,
             )
         }
     }
+    if (showLine) LineStatusDialog(onDismiss = { showLine = false })
+}
+
+@Composable
+private fun LineStatusDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val line by PhoneManager.lineStatus.collectAsState()
+    val notifications = Notifications.notificationsAllowed(context)
+    val fullScreen = Notifications.canUseFullScreenIntent(context)
+    val battery = Notifications.batteryUnrestricted(context)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Line status") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                StatusLine("Registration", registrationLabel(line))
+                StatusLine("SDK registered", if (line.sdkRegistered) "yes" else "no")
+                StatusLine("Expiry", if (line.regTimeoutSec > 0) "${line.regTimeoutSec}s" else "—")
+                StatusLine("Username", line.username ?: "—")
+                StatusLine("Last REGISTER", "${line.lastRegisterResult} · ${ago(line.lastRegisterAt)}")
+                StatusLine(
+                    "Last refresh",
+                    listOfNotNull(line.lastRefreshReason, ago(line.lastRefreshAt).takeIf { line.lastRefreshAt != null })
+                        .joinToString(" · ").ifBlank { "none" },
+                )
+                StatusLine("Last invite", ago(line.lastInviteAt))
+                StatusLine("Invite from", line.lastInviteFrom ?: "none yet")
+                StatusLine("Invite Call-ID", line.lastInviteCallId ?: "—")
+                StatusLine("Notifications", if (notifications) "allowed" else "denied")
+                StatusLine("Full-screen alerts", if (fullScreen) "allowed" else "denied")
+                StatusLine("Battery", if (battery) "unrestricted" else "optimized")
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = {
+            Row {
+                if (!notifications) TextButton(onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }) { Text("Notifications") }
+                if (!fullScreen && Build.VERSION.SDK_INT >= 34) TextButton(onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                Uri.parse("package:${context.packageName}"),
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }) { Text("Full screen") }
+                if (!battery) TextButton(onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:${context.packageName}"),
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }) { Text("Battery") }
+            }
+        },
+    )
+}
+
+@Composable
+private fun StatusLine(label: String, value: String) {
+    Column {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private fun registrationLabel(line: LineStatus): String = when (line.registration) {
+    Registration.ONLINE -> "Ready"
+    Registration.CONNECTING -> "Connecting"
+    Registration.FAILED -> "Failed, retrying"
+    Registration.OFFLINE -> "Offline"
+}
+
+private fun ago(at: Long?): String {
+    if (at == null) return "none"
+    return DateUtils.getRelativeTimeSpanString(
+        at, System.currentTimeMillis(), DateUtils.SECOND_IN_MILLIS,
+    ).toString()
 }
 
 private val KEYS = listOf(

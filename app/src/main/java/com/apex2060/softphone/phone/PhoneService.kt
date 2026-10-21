@@ -5,8 +5,19 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -15,6 +26,7 @@ import com.apex2060.softphone.config.Provisioner
 import com.apex2060.softphone.config.RevokedException
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.Outcome
+import com.apex2060.softphone.ui.CallActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,12 +42,21 @@ import kotlinx.coroutines.launch
 class PhoneService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var lastPhase: CallPhase? = null
+    private var ringing = false
+    private var player: MediaPlayer? = null
+    private var vibrator: Vibrator? = null
+    private var screenWake: PowerManager.WakeLock? = null
+    private var stayAwake: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         goForeground(Notifications.status(this, PhoneManager.registration.value, null), mic = false)
+        acquireKeepAlive()
+        watchNetwork()
 
         scope.launch {
             ConfigStore.config.collect { cfg ->
@@ -61,6 +82,12 @@ class PhoneService : Service() {
         }
         scope.launch {
             while (true) {
+                delay(REGISTER_REFRESH_MS)
+                PhoneManager.refreshRegistration("timer")
+            }
+        }
+        scope.launch {
+            while (true) {
                 refreshIfDue()
                 delay(60 * 60_000L)
             }
@@ -76,6 +103,13 @@ class PhoneService : Service() {
     }
 
     override fun onDestroy() {
+        networkCallback?.let {
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
+        }
+        networkCallback = null
+        stopRing()
+        stayAwake?.let { if (it.isHeld) it.release() }
+        wifiLock?.let { if (it.isHeld) it.release() }
         scope.cancel()
         super.onDestroy()
     }
@@ -84,7 +118,9 @@ class PhoneService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (call?.phase == CallPhase.RINGING_IN) {
             nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, call.number))
+            startRing(call.number)
         } else {
+            stopRing()
             nm.cancel(Notifications.ID_INCOMING)
         }
         if (call?.phase == CallPhase.ENDED && lastPhase != CallPhase.ENDED && call.outcome == Outcome.MISSED) {
@@ -94,6 +130,130 @@ class PhoneService : Service() {
 
         val inCall = call != null && call.phase in setOf(CallPhase.DIALING, CallPhase.RINGING_OUT, CallPhase.ACTIVE)
         goForeground(Notifications.status(this, reg, call), mic = inCall)
+    }
+
+    private fun startRing(number: String) {
+        if (ringing) return
+        ringing = true
+        val fullScreen = Notifications.canUseFullScreenIntent(this)
+        val foreground = PhoneManager.isAppForeground()
+        Log.i(
+            TAG,
+            "ring start from=$number foreground=$foreground fullScreenIntent=$fullScreen " +
+                "notifications=${Notifications.notificationsAllowed(this)} " +
+                "batteryUnrestricted=${Notifications.batteryUnrestricted(this)} " +
+                PhoneManager.registrationSnapshot(),
+        )
+        val mode = getSystemService(AudioManager::class.java).ringerMode
+        if (mode != AudioManager.RINGER_MODE_SILENT) startVibration()
+        if (mode == AudioManager.RINGER_MODE_NORMAL) startTone()
+        wakeScreen()
+        // Full-screen intent is the reliable path while backgrounded, and only when Android 14+
+        // has actually granted it. Otherwise open the call screen ourselves (foreground, or as a
+        // best-effort when the system will not).
+        if (foreground || !fullScreen) {
+            Log.i(TAG, "opening call screen foreground=$foreground fullScreenIntent=$fullScreen")
+            runCatching {
+                startActivity(
+                    Intent(this, CallActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                )
+            }.onFailure { Log.w(TAG, "opening call screen blocked: ${it.javaClass.simpleName}") }
+        } else {
+            Log.i(TAG, "call screen left to fullScreenIntent")
+        }
+    }
+
+    private fun startTone() {
+        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE) ?: return
+        player = runCatching {
+            MediaPlayer().apply {
+                setDataSource(applicationContext, uri)
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                isLooping = true
+                prepare()
+                start()
+            }
+        }.onFailure { Log.w(TAG, "ringtone failed: ${it.javaClass.simpleName}") }.getOrNull()
+    }
+
+    private fun startVibration() {
+        vibrator = if (Build.VERSION.SDK_INT >= 31) {
+            getSystemService(VibratorManager::class.java).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Vibrator::class.java)
+        }
+        val pattern = longArrayOf(0, 800, 600, 800, 600)
+        runCatching {
+            vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
+        }.onFailure { Log.w(TAG, "vibrate failed: ${it.javaClass.simpleName}") }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wakeScreen() {
+        val pm = getSystemService(PowerManager::class.java)
+        screenWake = pm.newWakeLock(
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                PowerManager.ON_AFTER_RELEASE,
+            "softphone:ring",
+        ).apply { acquire(20_000) }
+    }
+
+    private fun stopRing() {
+        if (!ringing && player == null && screenWake == null) return
+        ringing = false
+        player?.runCatching { release() }
+        player = null
+        vibrator?.cancel()
+        screenWake?.let { if (it.isHeld) it.release() }
+        screenWake = null
+    }
+
+    /** CPU and wifi stay up so the 120s REGISTER and UDP keepalive survive Doze. */
+    @Suppress("DEPRECATION")
+    private fun acquireKeepAlive() {
+        val pm = getSystemService(PowerManager::class.java)
+        stayAwake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "softphone:register").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        val mode = if (Build.VERSION.SDK_INT >= 29) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        wifiLock = runCatching {
+            applicationContext.getSystemService(WifiManager::class.java)
+                ?.createWifiLock(mode, "softphone:register")
+                ?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+        }.onFailure { Log.w(TAG, "wifi lock failed: ${it.javaClass.simpleName}") }.getOrNull()
+        Log.i(TAG, "keep-alive held wake=${stayAwake?.isHeld == true} wifi=${wifiLock?.isHeld == true}")
+    }
+
+    private fun watchNetwork() {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                scope.launch { PhoneManager.refreshRegistration("network") }
+            }
+
+            override fun onLost(network: Network) {
+                scope.launch { PhoneManager.refreshRegistration("network") }
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+            .onSuccess { networkCallback = callback }
+            .onFailure { Log.w(TAG, "network callback failed: ${it.javaClass.simpleName}") }
     }
 
     private fun goForeground(notification: android.app.Notification, mic: Boolean) {
@@ -125,6 +285,7 @@ class PhoneService : Service() {
 
     companion object {
         private const val TAG = "PhoneService"
+        private const val REGISTER_REFRESH_MS = 90_000L
         const val ACTION_DECLINE = "com.apex2060.softphone.DECLINE"
         const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
 
