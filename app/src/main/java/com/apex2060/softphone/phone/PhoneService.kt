@@ -40,6 +40,8 @@ class PhoneService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var lastPhase: CallPhase? = null
     private var ringing = false
+    /** True while the foreground or incoming notification is a CallStyle. */
+    private var callNotificationPosted = false
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var screenWake: PowerManager.WakeLock? = null
@@ -113,9 +115,10 @@ class PhoneService : Service() {
 
     private fun render(reg: Registration, call: com.apex2060.softphone.CallUi?) {
         val nm = getSystemService(NotificationManager::class.java)
-        if (call?.phase == CallPhase.RINGING_IN) {
-            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, call.number))
-            startRing(call.number)
+        val incoming = call?.takeIf { it.phase == CallPhase.RINGING_IN }
+        if (incoming != null) {
+            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, incoming.number))
+            startRing(incoming.number)
         } else {
             stopRing()
             nm.cancel(Notifications.ID_INCOMING)
@@ -125,7 +128,21 @@ class PhoneService : Service() {
         }
         lastPhase = call?.phase
         val inCall = call != null && call.phase in setOf(CallPhase.DIALING, CallPhase.RINGING_OUT, CallPhase.ACTIVE)
+        val callChrome = inCall || incoming != null
+        if (callNotificationPosted && !callChrome) {
+            // Updating a CallStyle notification in place leaves the lock-screen
+            // chronometer running. Remove it, then post the idle status.
+            dismissCallNotifications(nm)
+        }
+        callNotificationPosted = callChrome
         goForeground(Notifications.status(this, reg, call), mic = inCall)
+    }
+
+    private fun dismissCallNotifications(nm: NotificationManager) {
+        nm.cancel(Notifications.ID_INCOMING)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        nm.cancel(Notifications.ID_SERVICE)
+        SpikeLog.append("cleared call notification and lock-screen timer")
     }
 
     private fun startRing(number: String) {

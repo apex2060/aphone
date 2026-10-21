@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +30,8 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -106,10 +107,12 @@ fun HomeScreen(config: ProvisionConfig, onOpenCall: () -> Unit, onDial: (String)
                 config, engine, phoneOn,
                 onLongPress = { showReset = true },
                 onDetails = { showDetails = true },
-                onTurnOff = { PhoneService.turnOff(context) },
+                onPhoneChange = { on ->
+                    if (on) PhoneService.turnOn(context) else PhoneService.turnOff(context)
+                },
             )
             if (!phoneOn) {
-                PhoneOff { PhoneService.turnOn(context) }
+                PhoneOff()
                 return@Column
             }
             val call by engine.call.collectAsState()
@@ -157,7 +160,7 @@ private fun Header(
     phoneOn: Boolean,
     onLongPress: () -> Unit,
     onDetails: () -> Unit,
-    onTurnOff: () -> Unit,
+    onPhoneChange: (Boolean) -> Unit,
 ) {
     val line by engine.line.collectAsState()
     val reg by engine.registration.collectAsState()
@@ -177,7 +180,13 @@ private fun Header(
             config.title, color = MaterialTheme.colorScheme.onPrimary,
             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress),
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClickLabel = "Open details",
+                    onClick = onDetails,
+                    onLongClick = onLongPress,
+                ),
         )
         Row(
             Modifier.fillMaxWidth().padding(top = 2.dp),
@@ -190,21 +199,18 @@ private fun Header(
                 color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).clickable(onClick = onDetails),
+                modifier = Modifier.weight(1f),
             )
-            if (phoneOn) {
-                Text(
-                    "Turn off",
-                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.clickable(onClick = onTurnOff).padding(end = 12.dp),
-                )
-            }
-            Text(
-                "Details",
-                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.clickable(onClick = onDetails),
+            Switch(
+                checked = phoneOn,
+                onCheckedChange = onPhoneChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                    checkedTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.45f),
+                    uncheckedThumbColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
+                    uncheckedTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.24f),
+                    uncheckedBorderColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
+                ),
             )
         }
         if (network.isNotEmpty()) {
@@ -219,7 +225,7 @@ private fun Header(
 }
 
 @Composable
-private fun PhoneOff(onTurnOn: () -> Unit) {
+private fun PhoneOff() {
     Column(
         Modifier.fillMaxSize().padding(32.dp),
         verticalArrangement = Arrangement.Center,
@@ -237,8 +243,6 @@ private fun PhoneOff(onTurnOn: () -> Unit) {
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(24.dp))
-        Button(onClick = onTurnOn) { Text("Turn On") }
     }
 }
 

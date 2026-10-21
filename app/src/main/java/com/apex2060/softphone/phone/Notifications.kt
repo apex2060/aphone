@@ -84,7 +84,13 @@ object Notifications {
                 .setContentText(if (call.phase == CallPhase.ACTIVE) "On call" else "Calling…")
             call.answeredAt?.let { b.setWhen(it).setUsesChronometer(true).setShowWhen(true) }
         } else {
-            b.setContentText(
+            // A previous CallStyle notification keeps its lock-screen chronometer
+            // unless these are cleared on the replacement.
+            b.setUsesChronometer(false)
+                .setShowWhen(false)
+                .setWhen(0)
+                .setStyle(null)
+                .setContentText(
                 when (reg) {
                     Registration.ONLINE -> "Ready for calls"
                     Registration.CONNECTING -> "Connecting…"

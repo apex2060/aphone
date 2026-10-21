@@ -61,7 +61,10 @@ class CallActivity : ComponentActivity() {
         lifecycleScope.launch {
             engine.call.collect { call ->
                 updateProximity(call)
-                if (call == null || call.phase == CallPhase.ENDED) finish()
+                if (call == null || call.phase == CallPhase.ENDED) {
+                    leaveLockScreen()
+                    finish()
+                }
             }
         }
         setContent {
@@ -95,7 +98,21 @@ class CallActivity : ComponentActivity() {
 
     override fun onDestroy() {
         proximity?.takeIf { it.isHeld }?.release()
+        leaveLockScreen()
         super.onDestroy()
+    }
+
+    /** Drop the lock-screen window so a finished call cannot keep the timer up. */
+    private fun leaveLockScreen() {
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        }
+        window.clearFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
+        )
     }
 
     private fun handleAnswer(intent: Intent?, engine: com.apex2060.softphone.SipEngine) {

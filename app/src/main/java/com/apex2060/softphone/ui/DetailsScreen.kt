@@ -24,6 +24,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,10 +68,18 @@ fun DetailsScreen(engine: SipEngine, onBack: () -> Unit) {
             }
             val phoneOn by ConfigStore.phoneEnabled.collectAsState()
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (phoneOn) {
-                    Button(onClick = { PhoneService.turnOff(context) }) { Text("Turn Off") }
-                } else {
-                    Button(onClick = { PhoneService.turnOn(context) }) { Text("Turn On") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (phoneOn) "Phone is on" else "Phone is off",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Switch(
+                        checked = phoneOn,
+                        onCheckedChange = { on ->
+                            if (on) PhoneService.turnOn(context) else PhoneService.turnOff(context)
+                        },
+                    )
                 }
                 StatusLine("Registration", if (phoneOn) UiText.scrub(line.status) else "Phone is off")
                 StatusLine("Username", UiText.scrub(line.username.ifBlank { "—" } + if (line.manual) " (manual)" else ""))
