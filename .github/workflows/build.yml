@@ -189,11 +189,17 @@ jobs:
           fi
           "$zipalign" -c -P 16 -v 4 dist/22phone.apk
           python3 sipspike/third_party/check-elf-alignment.py dist/22phone.apk
-          aab_out="$(jarsigner -verify -certs dist/22phone.aab 2>&1)" || {
-            printf '%s\n' "$aab_out"
+          if ! jarsigner -verify dist/22phone.aab; then
             echo "::error::AAB signature verification failed."
             exit 1
-          }
+          fi
+          aab_cert="$(unzip -Z1 dist/22phone.aab | grep -E 'META-INF/.*\.(RSA|DSA|EC)$' | head -1)"
+          if [ -z "$aab_cert" ]; then
+            echo "::error::AAB has no signature block."
+            exit 1
+          fi
+          aab_out="$(unzip -p dist/22phone.aab "$aab_cert" | keytool -printcert)"
+          printf '%s\n' "$aab_out"
           if printf '%s\n' "$aab_out" | grep -q "CN=Android Debug"; then
             echo "::error::AAB is signed with the Android debug certificate."
             exit 1

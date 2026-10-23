@@ -254,12 +254,17 @@ jobs:
           if failed:
               raise SystemExit("ELF LOAD alignment is below 0x4000")
           PY
-          aab_out="$(jarsigner -verify -certs dist/22phone.aab 2>&1)" || {
-            printf '%s\n' "$aab_out"
+          if ! jarsigner -verify dist/22phone.aab; then
             echo "::error::AAB signature verification failed."
             exit 1
-          }
-          printf '%s\n' "$aab_out" | grep -E "CN=|jar verified" || true
+          fi
+          aab_cert="$(unzip -Z1 dist/22phone.aab | grep -E 'META-INF/.*\.(RSA|DSA|EC)$' | head -1)"
+          if [ -z "$aab_cert" ]; then
+            echo "::error::AAB has no signature block."
+            exit 1
+          fi
+          aab_out="$(unzip -p dist/22phone.aab "$aab_cert" | keytool -printcert)"
+          printf '%s\n' "$aab_out"
           if printf '%s\n' "$aab_out" | grep -q "CN=Android Debug"; then
             echo "::error::AAB is signed with the Android debug certificate."
             exit 1
