@@ -24,7 +24,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
-import com.apex2060.softphone.config.ProvisionConfig
 import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneService
 import com.apex2060.softphone.record.Recordings
@@ -41,12 +40,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             val stored by ConfigStore.lines.collectAsState()
             var adding by remember { mutableStateOf(false) }
-            val theme = (stored.firstOrNull { it.enabled } ?: stored.firstOrNull())?.config?.theme
-                ?: ProvisionConfig.DEFAULT_THEME
             if (stored.isEmpty()) {
                 SoftphoneTheme { ScanScreen() }
             } else if (adding) {
-                SoftphoneTheme(theme) { ScanScreen(onCancel = { adding = false }) }
+                SoftphoneTheme { ScanScreen(onCancel = { adding = false }) }
             } else {
                 val permissions = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
@@ -59,7 +56,7 @@ class MainActivity : ComponentActivity() {
                     }
                     permissions.launch(wanted.toTypedArray())
                 }
-                SoftphoneTheme(theme) {
+                SoftphoneTheme {
                     HomeScreen(onOpenCall = ::openCall, onAdd = { adding = true })
                     RecordingPromptHost()
                 }

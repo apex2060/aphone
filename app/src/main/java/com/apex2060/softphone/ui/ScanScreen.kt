@@ -11,6 +11,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -141,7 +142,13 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
             if (onCancel != null) TextButton(onClick = onCancel) { Text("Cancel", color = Color.White) }
         }
         Surface(
-            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 12.dp),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 12.dp)
+                .then(
+                    if (onCancel != null) Modifier.clickable(onClickLabel = "Phones", onClick = onCancel) else Modifier,
+                ),
             shape = RoundedCornerShape(16.dp),
             color = Color.White,
         ) {

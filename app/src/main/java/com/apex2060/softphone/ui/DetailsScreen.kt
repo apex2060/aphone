@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -58,7 +57,7 @@ import com.apex2060.softphone.phone.PhoneService
 import java.io.File
 
 @Composable
-fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
+fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome: () -> Unit) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val stored by ConfigStore.lines.collectAsState()
@@ -77,10 +76,12 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
     var confirmRemove by remember { mutableStateOf(false) }
     var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+        Column(Modifier.fillMaxSize()) {
+            PhoneAppBar(engine, onTitle = onHome, onNetwork = null)
+            Column(
+                Modifier.weight(1f).navigationBarsPadding().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("Back") }
                 Text(
@@ -196,12 +197,13 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
                     Text(UiText.scrub(row), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                 }
             }
+            }
         }
     }
     val requested = pendingRecord
     if (requested != null) {
         RecordingPinDialog(
-            pinRequired = line.config.adminPin.orEmpty(),
+            accept = { it == line.config.adminPin },
             onDismiss = { pendingRecord = null },
             onConfirm = {
                 ConfigStore.setAutoRecording(requested)
@@ -223,7 +225,114 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun RecordingPinDialog(pinRequired: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val context = LocalContext.current
+    val stored by ConfigStore.lines.collectAsState()
+    val pins = stored.mapNotNull { it.config.adminPin }
+    val autoRecording by ConfigStore.autoRecording.collectAsState()
+    var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(Modifier.fillMaxSize()) {
+            PhoneAppBar(engine, onTitle = onHome, onNetwork = null)
+            Column(
+                Modifier.weight(1f).navigationBarsPadding().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onBack) { Text("Back") }
+                    Text(
+                        "Settings",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f).padding(vertical = 4.dp),
+                    )
+                }
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text("Auto-record calls", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Records every call. You'll be asked to save or discard each recording when the call ends.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = autoRecording,
+                            onCheckedChange = { want ->
+                                if (pins.isEmpty()) ConfigStore.setAutoRecording(want) else pendingRecord = want
+                            },
+                        )
+                    }
+                    StatusLine("Notifications", if (Notifications.notificationsAllowed(context)) "allowed" else "denied")
+                    StatusLine("Full-screen alerts", if (Notifications.canUseFullScreenIntent(context)) "allowed" else "denied")
+                    StatusLine("Battery", if (Notifications.batteryUnrestricted(context)) "unrestricted" else "optimized")
+                    DeviceAccessLinks(context)
+                }
+                HorizontalDivider()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { share(context, engine) }) { Text("Share") }
+                    Button(onClick = { copy(context, engine) }) { Text("Copy") }
+                    TextButton(onClick = { engine.clearLog() }) { Text("Clear") }
+                }
+                LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                    items(engine.lines) { row ->
+                        Text(UiText.scrub(row), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+    }
+    val requested = pendingRecord
+    if (requested != null) {
+        RecordingPinDialog(
+            accept = { it in pins },
+            onDismiss = { pendingRecord = null },
+            onConfirm = {
+                ConfigStore.setAutoRecording(requested)
+                pendingRecord = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun DeviceAccessLinks(context: android.content.Context) {
+    if (!Notifications.notificationsAllowed(context)) {
+        TextButton(onClick = {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                )
+            }
+        }) { Text("Allow notifications") }
+    }
+    if (!Notifications.batteryUnrestricted(context)) {
+        TextButton(onClick = {
+            runCatching {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:${context.packageName}"),
+                    )
+                )
+            }
+        }) { Text("Unrestrict battery") }
+    }
+    if (!Notifications.canUseFullScreenIntent(context) && Build.VERSION.SDK_INT >= 34) {
+        TextButton(onClick = {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${context.packageName}"))
+                )
+            }
+        }) { Text("Allow full-screen alerts") }
+    }
+}
+
+@Composable
+private fun RecordingPinDialog(accept: (String) -> Boolean, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     var pin by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
     AlertDialog(
@@ -244,7 +353,7 @@ private fun RecordingPinDialog(pinRequired: String, onDismiss: () -> Unit, onCon
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (pin == pinRequired) onConfirm() else wrong = true }) { Text("OK") }
+            TextButton(onClick = { if (accept(pin)) onConfirm() else wrong = true }) { Text("OK") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

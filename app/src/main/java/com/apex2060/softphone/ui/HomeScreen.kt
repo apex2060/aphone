@@ -2,32 +2,29 @@ package com.apex2060.softphone.ui
 
 import android.text.format.DateUtils
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -38,9 +35,11 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -50,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -59,7 +59,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.text.KeyboardOptions
 import com.apex2060.softphone.CallPhase
 import com.apex2060.softphone.LineUi
 import com.apex2060.softphone.R
@@ -69,6 +68,7 @@ import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.UiText
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.LineLogic
+import com.apex2060.softphone.config.ProvisionConfig
 import com.apex2060.softphone.config.StoredLine
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.CallRecord
@@ -80,6 +80,13 @@ private enum class Tab(val label: String, @DrawableRes val icon: Int) {
     KEYPAD("Keypad", R.drawable.ic_dialpad),
     SPEED("Contacts", R.drawable.ic_star),
     RECENTS("Recents", R.drawable.ic_history),
+}
+
+private sealed interface Place {
+    data object Phones : Place
+    data class Dialer(val lineId: String) : Place
+    data class LineSettings(val lineId: String) : Place
+    data object Settings : Place
 }
 
 private val KEYS = listOf(
@@ -95,30 +102,8 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
     val engine = (context.applicationContext as SoftphoneApp).engine
     val stored by ConfigStore.lines.collectAsState()
     val statuses by engine.statuses.collectAsState()
-    val lastDial by ConfigStore.lastDial.collectAsState()
-    val enabled = stored.filter { it.enabled }
-    var picked by remember { mutableStateOf<String?>(null) }
-    val selectedId = when {
-        enabled.size == 1 -> enabled[0].id
-        picked != null && enabled.any { it.id == picked } -> picked
-        lastDial != null && enabled.any { it.id == lastDial } -> lastDial
-        else -> enabled.firstOrNull()?.id
-    }
-    val active = stored.firstOrNull { it.id == selectedId }
-    val tabs = buildList {
-        if (active?.config?.allowFreeDial != false && enabled.isNotEmpty()) add(Tab.KEYPAD)
-        if (active != null && active.config.speedDials.isNotEmpty() && enabled.isNotEmpty()) add(Tab.SPEED)
-        add(Tab.RECENTS)
-    }
-    var selected by remember { mutableIntStateOf(0) }
-    val tab = tabs[selected.coerceIn(0, tabs.lastIndex)]
+    var place by remember { mutableStateOf<Place>(Place.Phones) }
     var resetId by remember { mutableStateOf<String?>(null) }
-    var detailsId by remember { mutableStateOf<String?>(null) }
-
-    if (detailsId != null && stored.any { it.id == detailsId }) {
-        DetailsScreen(engine, detailsId!!, onBack = { detailsId = null })
-        return
-    }
 
     fun dial(number: String, lineId: String) {
         val line = ConfigStore.line(lineId)
@@ -135,89 +120,61 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
         else Toast.makeText(context, "That phone isn't ready", Toast.LENGTH_SHORT).show()
     }
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(
-            Modifier.fillMaxSize().then(
-                if (tabs.size > 1) Modifier else Modifier.navigationBarsPadding(),
-            ),
-        ) {
-            NetworkBar(engine)
-            Column(
-                Modifier
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                stored.forEach { line ->
-                    PhoneRow(
-                        line,
-                        statuses[line.id],
-                        onOpen = { detailsId = line.id },
-                        onReset = { resetId = line.id },
-                        onToggle = { on ->
-                            if (on) PhoneService.turnOn(context, line.id) else PhoneService.turnOff(context, line.id)
-                        },
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.surface)
-                }
-                TextButton(
-                    onClick = {
-                        if (stored.size >= LineLogic.MAX_LINES) {
-                            Toast.makeText(context, "You can add up to ${LineLogic.MAX_LINES} phones", Toast.LENGTH_SHORT).show()
-                        } else {
-                            onAdd()
-                        }
+    when (val here = place) {
+        Place.Settings -> AppSettingsScreen(
+            engine,
+            onBack = { place = Place.Phones },
+            onHome = { place = Place.Phones },
+        )
+        is Place.LineSettings -> DetailsScreen(
+            engine,
+            here.lineId,
+            onBack = { place = Place.Dialer(here.lineId) },
+            onHome = { place = Place.Phones },
+        )
+        else -> {
+            val dialerId = (here as? Place.Dialer)?.lineId
+            if (dialerId != null) BackHandler { place = Place.Phones }
+            Column(Modifier.fillMaxSize()) {
+                PhoneAppBar(
+                    engine,
+                    onTitle = if (dialerId != null) ({ place = Place.Phones }) else null,
+                    onNetwork = {
+                        place = if (dialerId != null) Place.LineSettings(dialerId) else Place.Settings
                     },
-                    modifier = Modifier.padding(horizontal = 8.dp),
-                ) { Text("Add phone") }
-            }
-            if (enabled.isEmpty()) {
-                Text(
-                    "All phones are off",
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-            val call by engine.call.collectAsState()
-            if (call != null && call?.phase != CallPhase.ENDED) {
-                Text(
-                    "Call in progress · tap to return",
-                    color = androidx.compose.ui.graphics.Color.White,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(LocalCallColors.current.accept)
-                        .clickable(onClick = onOpenCall)
-                        .padding(12.dp),
-                )
-            }
-            if (enabled.size > 1 && tab != Tab.RECENTS) {
-                LinePicker(enabled, selectedId) { id ->
-                    picked = id
-                    ConfigStore.setLastDial(id)
+                val call by engine.call.collectAsState()
+                if (call != null && call?.phase != CallPhase.ENDED) {
+                    Text(
+                        "Call in progress · tap to return",
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(LocalCallColors.current.accept)
+                            .clickable(onClick = onOpenCall)
+                            .padding(12.dp),
+                    )
                 }
-            }
-            Box(Modifier.weight(1f)) {
-                when (tab) {
-                    Tab.KEYPAD -> if (active != null) {
-                        Keypad(
-                            statuses[active.id],
-                            onDial = { number -> dial(number, active.id) },
-                        )
-                    }
-                    Tab.SPEED -> if (active != null) SpeedDials(active) { dial(it, active.id) }
-                    Tab.RECENTS -> Recents(engine, stored, enabled, selectedId, ::dial)
-                }
-            }
-            if (tabs.size > 1) {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                    tabs.forEachIndexed { i, t ->
-                        NavigationBarItem(
-                            selected = t == tab,
-                            onClick = { selected = i },
-                            icon = { Icon(painterResource(t.icon), contentDescription = null) },
-                            label = { Text(t.label) },
-                        )
+                if (dialerId == null) {
+                    PhoneList(
+                        stored,
+                        statuses,
+                        onOpen = { place = Place.Dialer(it) },
+                        onReset = { resetId = it },
+                        onAdd = onAdd,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Box(Modifier.weight(1f)) {
+                        val line = stored.firstOrNull { it.id == dialerId }
+                        if (line == null) {
+                            LaunchedEffect(dialerId) { place = Place.Phones }
+                        } else {
+                            SoftphoneTheme(line.config.theme) {
+                                LineDialer(line, statuses[line.id], engine, ::dial)
+                            }
+                        }
                     }
                 }
             }
@@ -230,87 +187,184 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
 }
 
 @Composable
-private fun NetworkBar(engine: SipEngine) {
+fun PhoneAppBar(
+    engine: SipEngine,
+    onTitle: (() -> Unit)?,
+    onNetwork: (() -> Unit)?,
+) {
     val network by engine.network.collectAsState()
-    val label = UiText.networkIndicator(network)
+    val detected = UiText.networkIndicator(network)
+    val label = detected.ifBlank { "Network" }
+    val bar = Color(ProvisionConfig.DEFAULT_THEME.primary)
+    val onBar = Color(ProvisionConfig.DEFAULT_THEME.onPrimary)
     Row(
         Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.primary)
+            .background(bar)
             .statusBarsPadding()
             .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             "22 Phone",
-            color = MaterialTheme.colorScheme.onPrimary,
+            color = onBar,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
+            modifier = if (onTitle != null) {
+                Modifier.clickable(onClickLabel = "Phones", onClick = onTitle)
+            } else {
+                Modifier
+            },
         )
         Spacer(Modifier.weight(1f))
-        if (label.isNotEmpty()) {
-            Text(
-                label,
-                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
-                style = MaterialTheme.typography.labelLarge,
+        Text(
+            label,
+            color = onBar.copy(alpha = if (detected.isEmpty()) 0.75f else 0.9f),
+            style = MaterialTheme.typography.labelLarge,
+            modifier = if (onNetwork != null) {
+                Modifier.clickable(onClickLabel = "Settings", onClick = onNetwork)
+            } else {
+                Modifier
+            },
+        )
+    }
+}
+
+@Composable
+private fun PhoneList(
+    stored: List<StoredLine>,
+    statuses: Map<String, LineUi>,
+    onOpen: (String) -> Unit,
+    onReset: (String) -> Unit,
+    onAdd: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val allOff = stored.none { it.enabled }
+    LazyColumn(modifier.navigationBarsPadding()) {
+        if (allOff) {
+            item {
+                Text(
+                    "All phones are off",
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        items(stored, key = { it.id }) { line ->
+            PhoneCard(
+                line,
+                statuses[line.id],
+                onOpen = { onOpen(line.id) },
+                onReset = { onReset(line.id) },
+                onToggle = { on ->
+                    if (on) PhoneService.turnOn(context, line.id) else PhoneService.turnOff(context, line.id)
+                },
             )
+        }
+        item {
+            TextButton(
+                onClick = {
+                    if (stored.size >= LineLogic.MAX_LINES) {
+                        Toast.makeText(context, "You can add up to ${LineLogic.MAX_LINES} phones", Toast.LENGTH_SHORT).show()
+                    } else {
+                        onAdd()
+                    }
+                },
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            ) { Text("Add phone") }
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PhoneRow(
+private fun PhoneCard(
     line: StoredLine,
     status: LineUi?,
     onOpen: () -> Unit,
     onReset: () -> Unit,
     onToggle: (Boolean) -> Unit,
 ) {
+    val theme = line.config.theme
+    val primary = Color(theme.primary)
+    val onPrimary = Color(theme.onPrimary)
     val label = statusLabel(line.enabled, status?.registration)
     val dot = when {
-        !line.enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-        status?.registration == Registration.ONLINE -> LocalCallColors.current.accept
+        !line.enabled -> onPrimary.copy(alpha = 0.45f)
+        status?.registration == Registration.ONLINE -> Color(theme.accept)
         status?.registration == Registration.FAILED || status?.registration == Registration.OFFLINE ->
-            LocalCallColors.current.decline
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+            Color(theme.decline)
+        else -> onPrimary.copy(alpha = 0.7f)
     }
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val subtitle = phoneSubtitle(line)
+    Surface(
+        color = primary,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth(),
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                line.config.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.combinedClickable(
-                    onClickLabel = "Open details",
-                    onClick = onOpen,
-                    onLongClick = onReset,
-                ),
-            )
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
-                Spacer(Modifier.width(6.dp))
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        onClickLabel = "Open dialer",
+                        onClick = onOpen,
+                        onLongClick = onReset,
+                    ),
+            ) {
                 Text(
-                    "${lineNumber(line)} · $label",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    phoneTitle(line),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = onPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (subtitle.isNotEmpty()) {
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = onPrimary.copy(alpha = 0.85f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
+                    Spacer(Modifier.width(6.dp))
+                    Text(label, style = MaterialTheme.typography.bodySmall, color = onPrimary.copy(alpha = 0.9f))
+                }
             }
+            Switch(
+                checked = line.enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = onPrimary,
+                    checkedTrackColor = onPrimary.copy(alpha = 0.38f),
+                    uncheckedThumbColor = onPrimary.copy(alpha = 0.85f),
+                    uncheckedTrackColor = onPrimary.copy(alpha = 0.18f),
+                    uncheckedBorderColor = onPrimary.copy(alpha = 0.55f),
+                ),
+            )
         }
-        Switch(
-            checked = line.enabled,
-            onCheckedChange = onToggle,
-        )
     }
 }
+
+/** Business name from provisioning. The SIP username is used only when title is missing. */
+internal fun phoneTitle(line: StoredLine): String {
+    val title = line.config.title.trim()
+    if (title.isNotEmpty()) return title
+    return line.config.sipUsername.ifBlank { "Phone" }
+}
+
+/** Provisioned subtitle, usually the endpoint name and phone number. */
+internal fun phoneSubtitle(line: StoredLine): String = line.config.subtitle?.trim().orEmpty()
 
 private fun statusLabel(enabled: Boolean, registration: Registration?): String = when {
     !enabled -> "Off"
@@ -320,15 +374,99 @@ private fun statusLabel(enabled: Boolean, registration: Registration?): String =
     else -> "Offline"
 }
 
-private fun lineNumber(line: StoredLine): String {
-    val user = line.resolvedCreds()?.first ?: line.config.sipUsername
-    val sub = line.config.subtitle?.trim().orEmpty()
-    val subIsNumber = sub.any { it.isDigit() }
-    return when {
-        subIsNumber && sub != user -> "$sub · $user"
-        subIsNumber -> sub
-        user.isNotBlank() -> user
-        else -> "No number"
+@Composable
+private fun LineDialer(
+    line: StoredLine,
+    status: LineUi?,
+    engine: SipEngine,
+    onDial: (String, String) -> Unit,
+) {
+    val context = LocalContext.current
+    val tabs = buildList {
+        if (line.config.allowFreeDial) add(Tab.KEYPAD)
+        if (line.config.speedDials.isNotEmpty()) add(Tab.SPEED)
+        add(Tab.RECENTS)
+    }
+    var selected by remember(line.id) { mutableIntStateOf(0) }
+    val tab = tabs[selected.coerceIn(0, tabs.lastIndex)]
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            Modifier.fillMaxSize().then(
+                if (tabs.size > 1) Modifier else Modifier.navigationBarsPadding(),
+            ),
+        ) {
+            LineHeader(line, status) { on ->
+                if (on) PhoneService.turnOn(context, line.id) else PhoneService.turnOff(context, line.id)
+            }
+            Box(Modifier.weight(1f)) {
+                when (tab) {
+                    Tab.KEYPAD -> Keypad(status) { number -> onDial(number, line.id) }
+                    Tab.SPEED -> SpeedDials(line) { onDial(it, line.id) }
+                    Tab.RECENTS -> LineRecents(engine, line, onDial)
+                }
+            }
+            if (tabs.size > 1) {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                    tabs.forEachIndexed { i, item ->
+                        NavigationBarItem(
+                            selected = item == tab,
+                            onClick = { selected = i },
+                            icon = { Icon(painterResource(item.icon), contentDescription = null) },
+                            label = { Text(item.label) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LineHeader(line: StoredLine, status: LineUi?, onToggle: (Boolean) -> Unit) {
+    val onPrimary = MaterialTheme.colorScheme.onPrimary
+    val subtitle = phoneSubtitle(line)
+    val label = statusLabel(line.enabled, status?.registration)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.primary)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+    ) {
+        Text(
+            phoneTitle(line),
+            color = onPrimary,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (subtitle.isNotEmpty()) {
+            Text(
+                subtitle,
+                color = onPrimary.copy(alpha = 0.85f),
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, color = onPrimary, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            Switch(
+                checked = line.enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = onPrimary,
+                    checkedTrackColor = onPrimary.copy(alpha = 0.38f),
+                    uncheckedThumbColor = onPrimary.copy(alpha = 0.85f),
+                    uncheckedTrackColor = onPrimary.copy(alpha = 0.18f),
+                    uncheckedBorderColor = onPrimary.copy(alpha = 0.55f),
+                ),
+            )
+        }
     }
 }
 
@@ -381,33 +519,6 @@ private fun Keypad(
 }
 
 @Composable
-private fun LinePicker(lines: List<StoredLine>, selectedId: String?, onPick: (String) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("Call from", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        lines.forEach { line ->
-            val selected = line.id == selectedId
-            Text(
-                line.config.title,
-                maxLines = 1,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface)
-                    .clickable { onPick(line.id) }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-            )
-        }
-    }
-}
-
-@Composable
 private fun SpeedDials(line: StoredLine, onDial: (String) -> Unit) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(line.config.speedDials) { sd ->
@@ -427,54 +538,36 @@ private fun SpeedDials(line: StoredLine, onDial: (String) -> Unit) {
 }
 
 @Composable
-private fun Recents(
+private fun LineRecents(
     engine: SipEngine,
-    stored: List<StoredLine>,
-    enabled: List<StoredLine>,
-    selectedId: String?,
+    line: StoredLine,
     onDial: (String, String) -> Unit,
 ) {
     val records by CallHistory.records.collectAsState()
+    val shown = records.filter { it.lineId == line.id }
     val context = LocalContext.current
-    val names = remember(stored) {
-        stored.flatMap { line ->
-            line.config.speedDials.map { sd -> engine.normalize(sd.number, line.id) to sd.label }
-        }.toMap()
+    val names = remember(line.id, line.config.speedDials) {
+        line.config.speedDials.associate { engine.normalize(it.number, line.id) to it.label }
     }
     var chosen by remember { mutableStateOf<CallRecord?>(null) }
-    if (records.isEmpty()) {
+    if (shown.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No calls yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
         LazyColumn(Modifier.fillMaxSize()) {
-            items(records, key = { it.id }) { r ->
-                val name = names[engine.normalize(r.number, r.lineId)]
-                val line = r.lineId?.let { id -> stored.firstOrNull { it.id == id } }
-                val allow = line?.config?.allowFreeDial ?: stored.firstOrNull()?.config?.allowFreeDial ?: true
-                val canCall = allow || name != null
+            items(shown, key = { it.id }) { record ->
+                val name = names[engine.normalize(record.number, line.id)]
+                val canCall = line.config.allowFreeDial || name != null
                 RecentRow(
-                    r, name, enabled = canCall,
-                    onRecording = r.recording?.let { { chosen = r } },
+                    record, name, enabled = canCall,
+                    onRecording = record.recording?.let { { chosen = record } },
                 ) {
-                    val target = when {
-                        r.lineId != null && stored.none { it.id == r.lineId } -> {
-                            Toast.makeText(context, "That phone was removed", Toast.LENGTH_SHORT).show()
-                            return@RecentRow
-                        }
-                        r.lineId != null && line != null && !line.enabled -> {
-                            Toast.makeText(context, "That phone is off", Toast.LENGTH_SHORT).show()
-                            return@RecentRow
-                        }
-                        r.lineId != null && line?.enabled == true -> r.lineId
-                        enabled.size == 1 -> enabled[0].id
-                        selectedId != null -> selectedId
-                        else -> {
-                            Toast.makeText(context, "That phone is off", Toast.LENGTH_SHORT).show()
-                            return@RecentRow
-                        }
+                    if (!line.enabled) {
+                        Toast.makeText(context, "That phone is off", Toast.LENGTH_SHORT).show()
+                    } else {
+                        onDial(record.number, line.id)
                     }
-                    onDial(r.number, target)
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.surface)
             }
