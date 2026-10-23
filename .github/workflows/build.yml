@@ -27,6 +27,21 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK 36
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ -d "$sdk/platforms/android-36" ]; then
+            echo "platforms;android-36 already installed"
+            exit 0
+          fi
+          sm="$(find "$sdk/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)"
+          if [ -z "$sm" ]; then
+            echo "::error::sdkmanager was not found under ${sdk}."
+            exit 1
+          fi
+          yes | "$sm" --sdk_root="$sdk" --licenses >/dev/null || true
+          "$sm" --sdk_root="$sdk" "platforms;android-36"
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
 
@@ -62,6 +77,22 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK 36
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ -d "$sdk/platforms/android-36" ]; then
+            echo "platforms;android-36 already installed"
+            exit 0
+          fi
+          sm="$(find "$sdk/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)"
+          if [ -z "$sm" ]; then
+            echo "::error::sdkmanager was not found under ${sdk}."
+            exit 1
+          fi
+          yes | "$sm" --sdk_root="$sdk" --licenses >/dev/null || true
+          "$sm" --sdk_root="$sdk" "platforms;android-36"
 
       - name: Decode release keystore
         env:
@@ -106,7 +137,7 @@ jobs:
           echo "VERSION_NAME=${version_name}" >> "$GITHUB_ENV"
           echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
 
-      - name: Build signed release APK
+      - name: Build signed release APK and AAB
         env:
           ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/22phone-release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -114,17 +145,20 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon assembleRelease \
+          ./gradlew --no-daemon assembleRelease bundleRelease \
             -PversionName="${VERSION_NAME}" \
             -PversionCode="${VERSION_CODE}"
           apk="app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$apk" ]; then
-            echo "::error::Signed release APK was not produced. Refusing to publish an unsigned build."
+          aab="app/build/outputs/bundle/release/app-release.aab"
+          if [ ! -f "$apk" ] || [ ! -f "$aab" ]; then
+            echo "::error::Signed release APK or AAB was not produced. Refusing to publish an unsigned build."
             ls -la app/build/outputs/apk/release 2>/dev/null || true
+            ls -la app/build/outputs/bundle/release 2>/dev/null || true
             exit 1
           fi
           mkdir -p dist
           cp "$apk" dist/22phone.apk
+          cp "$aab" dist/22phone.aab
 
       - name: Verify signature and version
         run: |
@@ -148,11 +182,33 @@ jobs:
           printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
           printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
           printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"
+          zipalign="$(find "$sdk/build-tools" -type f -name zipalign | sort -V | tail -1)"
+          if [ -z "$zipalign" ]; then
+            echo "::error::zipalign was not found under ${sdk}."
+            exit 1
+          fi
+          "$zipalign" -c -P 16 -v 4 dist/22phone.apk
+          python3 sipspike/third_party/check-elf-alignment.py dist/22phone.apk
+          aab_out="$(jarsigner -verify -certs dist/22phone.aab 2>&1)" || {
+            printf '%s\n' "$aab_out"
+            echo "::error::AAB signature verification failed."
+            exit 1
+          }
+          if printf '%s\n' "$aab_out" | grep -q "CN=Android Debug"; then
+            echo "::error::AAB is signed with the Android debug certificate."
+            exit 1
+          fi
+          if ! printf '%s\n' "$aab_out" | grep -q "CN=22 Phone"; then
+            echo "::error::AAB is not signed with CN=22 Phone."
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: 22phone
-          path: dist/22phone.apk
+          path: |
+            dist/22phone.apk
+            dist/22phone.aab
           if-no-files-found: error
 
       - name: Attach APK to the GitHub Release
@@ -168,9 +224,9 @@ jobs:
             "- versionName: ${VERSION_NAME}" \
             "- versionCode: ${VERSION_CODE}" \
             "" \
-            "Download 22phone.apk from this release, then update the Google Drive link used to install the app.")
+            "22phone.apk is the sideload build. 22phone.aab is the Play App Bundle, signed with the same key.")
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/22phone.apk --clobber
+            gh release upload "$tag" dist/22phone.apk dist/22phone.aab --clobber
           else
-            gh release create "$tag" dist/22phone.apk --title "$tag" --notes "$notes"
+            gh release create "$tag" dist/22phone.apk dist/22phone.aab --title "$tag" --notes "$notes"
           fi

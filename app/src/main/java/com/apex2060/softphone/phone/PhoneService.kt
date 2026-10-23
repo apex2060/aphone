@@ -219,6 +219,9 @@ class PhoneService : Service() {
     }
 
     private fun goForeground(notification: android.app.Notification, mic: Boolean) {
+        // specialUse covers the always-on SIP registration. phoneCall would require
+        // the dialer role or a Telecom ConnectionService, which would take over audio.
+        // microphone is added only while a call is capturing audio.
         val base = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         val withMic = if (mic && Build.VERSION.SDK_INT >= 30) {
             base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE

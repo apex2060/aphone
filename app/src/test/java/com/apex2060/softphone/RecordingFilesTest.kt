@@ -1,10 +1,7 @@
 package com.apex2060.softphone
 
 import com.apex2060.softphone.record.RecordingFiles
-import com.apex2060.softphone.record.TapSeries
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.time.ZoneOffset
@@ -45,32 +42,6 @@ class RecordingFilesTest {
         } finally {
             dir.deleteRecursively()
         }
-    }
-
-    @Test
-    fun eightQuickTapsToggleOnce() {
-        val taps = TapSeries()
-        var now = 1_000L
-        repeat(7) {
-            assertFalse(taps.hit(now))
-            now += 1_000L
-        }
-        assertTrue(taps.hit(now))
-        now += 500L
-        assertFalse(taps.hit(now))
-    }
-
-    @Test
-    fun aSlowGapRestartsTheCount() {
-        val taps = TapSeries()
-        repeat(7) { assertFalse(taps.hit(it * 1_000L)) }
-        assertFalse(taps.hit(7_000L + 2_001L))
-        var now = 20_000L
-        repeat(7) {
-            assertFalse(taps.hit(now))
-            now += 2_000L
-        }
-        assertTrue(taps.hit(now))
     }
 
     private fun utc(text: String): Long = java.time.Instant.parse(text).toEpochMilli()

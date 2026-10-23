@@ -109,6 +109,10 @@ jobs:
             version_name="1.2.0"
             version_code="18"
             official="true"
+          elif [ "$tag" = "spike-pjsip-v0.10-official" ]; then
+            version_name="1.2.1"
+            version_code="19"
+            official="true"
           else
             version_name="${tag#spike-pjsip-v}"
             if [ "$version_name" = "$tag" ]; then
@@ -124,7 +128,24 @@ jobs:
           echo "VERSION_CODE=${version_code}" >> "$GITHUB_ENV"
           echo "OFFICIAL=${official}" >> "$GITHUB_ENV"
 
-      - name: Build signed official APK
+      - name: Install Android SDK 36
+        if: env.OFFICIAL == 'true'
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ -d "$sdk/platforms/android-36" ]; then
+            echo "platforms;android-36 already installed"
+            exit 0
+          fi
+          sm="$(find "$sdk/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)"
+          if [ -z "$sm" ]; then
+            echo "::error::sdkmanager was not found under ${sdk}."
+            exit 1
+          fi
+          yes | "$sm" --sdk_root="$sdk" --licenses >/dev/null || true
+          "$sm" --sdk_root="$sdk" "platforms;android-36"
+
+      - name: Build signed official APK and AAB
         if: env.OFFICIAL == 'true'
         env:
           ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/22phone-release.keystore
@@ -133,16 +154,18 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon :app:assembleRelease \
+          ./gradlew --no-daemon :app:assembleRelease :app:bundleRelease \
             -PversionName="${VERSION_NAME}" \
             -PversionCode="${VERSION_CODE}"
           apk="app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$apk" ]; then
-            echo "::error::Signed 22 Phone APK was not produced."
+          aab="app/build/outputs/bundle/release/app-release.aab"
+          if [ ! -f "$apk" ] || [ ! -f "$aab" ]; then
+            echo "::error::Signed 22 Phone APK or AAB was not produced."
             exit 1
           fi
           mkdir -p dist
           cp "$apk" dist/22phone.apk
+          cp "$aab" dist/22phone.aab
 
       - name: Build signed spike APK
         if: env.OFFICIAL != 'true'
@@ -193,6 +216,76 @@ jobs:
           printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
           printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"
           python3 sipspike/third_party/check-elf-alignment.py dist/22phone.apk
+          zipalign="$(find "$sdk/build-tools" -type f -name zipalign | sort -V | tail -1)"
+          if [ -z "$zipalign" ]; then
+            echo "::error::zipalign was not found under ${sdk}."
+            exit 1
+          fi
+          "$zipalign" -c -P 16 -v 4 dist/22phone.apk
+          readelf_bin="$(command -v readelf || true)"
+          if [ -z "$readelf_bin" ]; then
+            readelf_bin="$(find "$sdk/ndk" -type f -name llvm-readelf | sort -V | tail -1)"
+          fi
+          if [ -z "$readelf_bin" ]; then
+            echo "::error::readelf was not found."
+            exit 1
+          fi
+          native="$(mktemp -d)"
+          unzip -q dist/22phone.apk 'lib/*/*.so' -d "$native"
+          python3 - "$readelf_bin" "$native" <<'PY'
+          import pathlib, subprocess, sys
+          readelf, root = sys.argv[1], pathlib.Path(sys.argv[2])
+          sos = sorted(root.rglob("*.so"))
+          if not any(path.name == "libpjsua2.so" for path in sos):
+              raise SystemExit("libpjsua2.so is missing from the APK")
+          failed = False
+          for so in sos:
+              out = subprocess.check_output([readelf, "-lW", str(so)], text=True)
+              print(f"== {so.name}")
+              aligns = []
+              for line in out.splitlines():
+                  parts = line.split()
+                  if parts and parts[0] == "LOAD":
+                      aligns.append(int(parts[-1], 16))
+                      print(line)
+              if not aligns or any(align < 0x4000 for align in aligns):
+                  print(f"FAIL {so.name} p_align={aligns}")
+                  failed = True
+          if failed:
+              raise SystemExit("ELF LOAD alignment is below 0x4000")
+          PY
+          aab_out="$(jarsigner -verify -certs dist/22phone.aab 2>&1)" || {
+            printf '%s\n' "$aab_out"
+            echo "::error::AAB signature verification failed."
+            exit 1
+          }
+          printf '%s\n' "$aab_out" | grep -E "CN=|jar verified" || true
+          if printf '%s\n' "$aab_out" | grep -q "CN=Android Debug"; then
+            echo "::error::AAB is signed with the Android debug certificate."
+            exit 1
+          fi
+          if ! printf '%s\n' "$aab_out" | grep -q "CN=22 Phone"; then
+            echo "::error::AAB is not signed with CN=22 Phone."
+            exit 1
+          fi
+          aab_native="$(mktemp -d)"
+          unzip -q dist/22phone.aab 'base/lib/*/*.so' -d "$aab_native"
+          python3 - "$readelf_bin" "$aab_native" <<'PY'
+          import pathlib, subprocess, sys
+          readelf, root = sys.argv[1], pathlib.Path(sys.argv[2])
+          sos = sorted(root.rglob("*.so"))
+          if not sos:
+              raise SystemExit("AAB contains no native libraries")
+          failed = False
+          for so in sos:
+              out = subprocess.check_output([readelf, "-lW", str(so)], text=True)
+              aligns = [int(line.split()[-1], 16) for line in out.splitlines() if line.split()[:1] == ["LOAD"]]
+              print(f"{so.name} p_align={[hex(a) for a in aligns]}")
+              if not aligns or any(align < 0x4000 for align in aligns):
+                  failed = True
+          if failed:
+              raise SystemExit("AAB ELF LOAD alignment is below 0x4000")
+          PY
 
       - name: Verify spike signature, package, and 16 KB alignment
         if: env.OFFICIAL != 'true'
@@ -223,7 +316,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OFFICIAL == 'true' && '22phone' || '22siptest' }}
-          path: ${{ env.OFFICIAL == 'true' && 'dist/22phone.apk' || 'dist/22siptest.apk' }}
+          path: dist/
           if-no-files-found: error
 
       - name: Attach APK to a prerelease
@@ -233,7 +326,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           if [ "${OFFICIAL}" = "true" ]; then
-            asset="dist/22phone.apk"
+            assets=(dist/22phone.apk dist/22phone.aab)
             notes=$(printf '%s\n' \
               "Signed 22 Phone test build. This is not a v* release and it is not merged." \
               "" \
@@ -241,12 +334,14 @@ jobs:
               "- versionName: ${VERSION_NAME}" \
               "- versionCode: ${VERSION_CODE} (v1.0.5 is versionCode 14)" \
               "- label: 22 Phone" \
+              "- targetSdk: 36" \
               "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
               "" \
-              "Install over 22 Phone v1.0.5. The signing certificate is CN=22 Phone." \
+              "22phone.apk is the sideload build. 22phone.aab is the Play App Bundle, signed with the same key." \
+              "Install the APK over 22 Phone v1.0.5. The signing certificate is CN=22 Phone." \
               "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
           else
-            asset="dist/22siptest.apk"
+            assets=(dist/22siptest.apk)
             notes=$(printf '%s\n' \
               "Throwaway 22 SIP Test build. This is not a 22 Phone release." \
               "" \
@@ -259,9 +354,9 @@ jobs:
               "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "$tag" "$asset" \
+            gh release create "$tag" "${assets[@]}" \
               --prerelease \
               --title "$tag" \
               --notes "$notes"

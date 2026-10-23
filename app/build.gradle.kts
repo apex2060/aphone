@@ -12,17 +12,17 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.2.0"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 18
+    ?: "1.2.1"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 19
 
 android {
     namespace = "com.apex2060.softphone"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.apex2060.softphone"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = releaseVersionCode
         versionName = releaseVersionName
         // PJSIP is built for arm64. v1.0.5 also shipped armeabi-v7a via the Plivo SDK.

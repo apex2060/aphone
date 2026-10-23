@@ -202,7 +202,7 @@ object ConfigStore {
 
     fun clearManual(id: String) = update(id) { it.copy(manualUser = null, manualPass = null) }
 
-    /** Hidden. Toggled from the Details title, not from a visible setting. One switch for the app. */
+    /** App-wide. Stored in the same prefs file, so an upgrade keeps the current value. */
     fun setAutoRecording(on: Boolean) {
         prefs.edit().putBoolean(KEY_AUTO_RECORD, on).apply()
         _autoRecording.value = on

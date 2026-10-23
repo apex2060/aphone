@@ -6,9 +6,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import android.os.SystemClock
 import android.widget.Toast
-import androidx.compose.foundation.clickable
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -56,11 +55,11 @@ import com.apex2060.softphone.UiText
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.phone.Notifications
 import com.apex2060.softphone.phone.PhoneService
-import com.apex2060.softphone.record.TapSeries
 import java.io.File
 
 @Composable
 fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
     val context = LocalContext.current
     val stored by ConfigStore.lines.collectAsState()
     val line = stored.firstOrNull { it.id == lineId }
@@ -75,8 +74,8 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
     var outbound by remember(line.outboundRoute) { mutableStateOf(line.route()) }
     val probe by ClientProbe.text.collectAsState()
     val autoRecording by ConfigStore.autoRecording.collectAsState()
-    val taps = remember { TapSeries() }
     var confirmRemove by remember { mutableStateOf(false) }
+    var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp),
@@ -87,20 +86,7 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
                 Text(
                     "Details",
                     style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable {
-                            if (taps.hit(SystemClock.elapsedRealtime())) {
-                                val on = !ConfigStore.autoRecording.value
-                                ConfigStore.setAutoRecording(on)
-                                Toast.makeText(
-                                    context,
-                                    if (on) "Auto recording on" else "Auto recording off",
-                                    Toast.LENGTH_SHORT,
-                                ).show()
-                            }
-                        }
-                        .padding(vertical = 4.dp),
+                    modifier = Modifier.weight(1f).padding(vertical = 4.dp),
                 )
             }
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -118,11 +104,21 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
                         },
                     )
                 }
-                if (autoRecording) {
-                    Text(
-                        "Auto recording: On",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text("Auto-record calls", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Records every call. You'll be asked to save or discard each recording when the call ends.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = autoRecording,
+                        onCheckedChange = { want ->
+                            val pin = line.config.adminPin
+                            if (pin == null) ConfigStore.setAutoRecording(want) else pendingRecord = want
+                        },
                     )
                 }
                 val regText = if (!line.enabled) "Off" else UiText.scrub(status?.status ?: "Offline")
@@ -202,6 +198,17 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
             }
         }
     }
+    val requested = pendingRecord
+    if (requested != null) {
+        RecordingPinDialog(
+            pinRequired = line.config.adminPin.orEmpty(),
+            onDismiss = { pendingRecord = null },
+            onConfirm = {
+                ConfigStore.setAutoRecording(requested)
+                pendingRecord = null
+            },
+        )
+    }
     if (confirmRemove) {
         RemoveDialog(
             pinRequired = line.config.adminPin,
@@ -213,6 +220,34 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit) {
             },
         )
     }
+}
+
+@Composable
+private fun RecordingPinDialog(pinRequired: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    var pin by remember { mutableStateOf("") }
+    var wrong by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Admin PIN") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Enter the admin PIN to change auto-record.")
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = { pin = it; wrong = false },
+                    label = { Text("Admin PIN") },
+                    isError = wrong,
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (pin == pinRequired) onConfirm() else wrong = true }) { Text("OK") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

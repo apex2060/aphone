@@ -1,13 +1,16 @@
 package com.apex2060.softphone.ui
 
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.text.format.DateUtils
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,10 +21,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -50,6 +57,10 @@ class CallActivity : ComponentActivity() {
     private var proximity: PowerManager.WakeLock? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
@@ -151,6 +162,7 @@ private fun CallScreen(engine: com.apex2060.softphone.SipEngine, call: CallUi, n
             delay(1000)
         }
     }
+    val recording by engine.recordingActive.collectAsState()
     val status = when (call.phase) {
         CallPhase.RINGING_IN -> "Incoming call"
         CallPhase.DIALING -> "Calling…"
@@ -171,6 +183,19 @@ private fun CallScreen(engine: com.apex2060.softphone.SipEngine, call: CallUi, n
             }
             Spacer(Modifier.height(8.dp))
             Text(status, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (recording) {
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        painterResource(R.drawable.ic_recording),
+                        contentDescription = null,
+                        tint = colors.decline,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Recording", color = colors.decline, style = MaterialTheme.typography.labelLarge)
+                }
+            }
             if (dtmf.isNotEmpty()) Text(dtmf, fontSize = 24.sp, color = MaterialTheme.colorScheme.onBackground)
             Spacer(Modifier.weight(1f))
             when (call.phase) {

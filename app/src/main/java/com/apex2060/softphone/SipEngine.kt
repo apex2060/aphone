@@ -123,6 +123,7 @@ class SipEngine(private val app: Application) {
     private var triedClient = false
     private var audioMedia: AudioMedia? = null
     private val callRecording = CallRecording(app)
+    val recordingActive: StateFlow<Boolean> = callRecording.active
     private var audioIndex = -1
     private var signaled = false
     private var uiCleared = false

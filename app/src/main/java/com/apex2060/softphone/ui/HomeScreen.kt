@@ -136,7 +136,11 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
     }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+        Column(
+            Modifier.fillMaxSize().then(
+                if (tabs.size > 1) Modifier else Modifier.navigationBarsPadding(),
+            ),
+        ) {
             NetworkBar(engine)
             Column(
                 Modifier
@@ -230,7 +234,11 @@ private fun NetworkBar(engine: SipEngine) {
     val network by engine.network.collectAsState()
     val label = UiText.networkIndicator(network)
     Row(
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary).padding(horizontal = 20.dp, vertical = 14.dp),
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.primary)
+            .statusBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(

@@ -3,6 +3,9 @@ package com.apex2060.softphone.record
 import android.app.Application
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.pjsip.pjsua2.AudioMedia
 import org.pjsip.pjsua2.AudioMediaRecorder
 import java.io.File
@@ -20,6 +23,8 @@ class CallRecording(private val app: Application) {
     private var tried = false
     private var confirmed = false
     private var closed = true
+    private val _active = MutableStateFlow(false)
+    val active: StateFlow<Boolean> = _active.asStateFlow()
 
     fun reset() {
         synchronized(lock) {
@@ -64,6 +69,7 @@ class CallRecording(private val app: Application) {
                 file = pending
                 remote = remotePort
                 capture = captureMedia
+                _active.value = true
                 SpikeLog.append("recording started ${pending.name}")
             } catch (e: Exception) {
                 SpikeLog.append("recording failed: ${e.message}")
@@ -85,6 +91,7 @@ class CallRecording(private val app: Application) {
         synchronized(lock) {
             closed = true
             confirmed = false
+            _active.value = false
             val rec = recorder
             val pending = file
             val remotePort = remote

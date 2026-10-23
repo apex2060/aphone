@@ -17,11 +17,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -77,6 +79,7 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCamera = it }
     LaunchedEffect(Unit) { if (!hasCamera) permission.launch(Manifest.permission.CAMERA) }
     var state by remember { mutableStateOf<ScanState>(ScanState.Scanning) }
+    BackHandler(enabled = onCancel != null) { onCancel?.invoke() }
 
     fun onCode(text: String) {
         if (state != ScanState.Scanning) return
@@ -116,7 +119,7 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
             )
         }
         Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(32.dp),
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
