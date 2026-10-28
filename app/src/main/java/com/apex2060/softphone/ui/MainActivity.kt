@@ -37,9 +37,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val stored by ConfigStore.lines.collectAsState()
             var adding by remember { mutableStateOf(false) }
-            if (stored.isEmpty()) {
-                SoftphoneTheme { ScanScreen() }
-            } else if (adding) {
+            if (adding) {
                 SoftphoneTheme { ScanScreen(onCancel = { adding = false }) }
             } else {
                 val permissions = rememberLauncherForActivityResult(
@@ -48,6 +46,7 @@ class MainActivity : ComponentActivity() {
                     askFullScreenIntent()
                 }
                 LaunchedEffect(stored.joinToString { it.id }) {
+                    if (stored.isEmpty()) return@LaunchedEffect
                     if (ConfigStore.anyEnabled()) PhoneService.start(this@MainActivity)
                     val wanted = buildList {
                         add(Manifest.permission.RECORD_AUDIO)

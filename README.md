@@ -1,7 +1,7 @@
 # 22 Phone
 
-An Android phone app. A fresh install shows nothing but a QR scanner. Scan a
-setup code and the phone pulls its SIP credentials, title and colors from your server, registers,
+An Android phone app. Opening it shows the list of phones. Tap Add phone and scan a
+setup code. The phone pulls its SIP credentials, title and colors from your server, registers,
 and becomes a dialer that makes calls, rings for incoming calls, and keeps a call history.
 
 * **Provisioning:** QR code with a URL and key, then a JSON document from your server. See
@@ -16,7 +16,7 @@ and becomes a dialer that makes calls, rings for incoming calls, and keeps a cal
   notification with Answer and Decline, and missed calls are logged.
 * **History:** a local SQLite log of incoming, outgoing, missed and declined calls, with tap to call back.
 * **Remote control of the fleet:** the phone re-fetches its document every `refreshHours`, and
-  an HTTP `410` from your server wipes it back to the scanner.
+  an HTTP `410` from your server removes that phone from the list.
 * **Reset:** long-press the title bar and enter the admin PIN.
 
 Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and optional
@@ -55,8 +55,8 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.5` and `versionCode` defaults to `26`. A manual Build APK run
-uses the `version_name` and `version_code` inputs (for example `1.3.5` and `26`). A tag run
+`versionName` defaults to `1.3.6` and `versionCode` defaults to `27`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.6` and `27`). A tag run
 uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
 Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
 never committed.
@@ -116,9 +116,10 @@ uninstall the old one, then scan the QR again.
 
 ## First run on a phone
 
-1. Install the APK and open it. Allow the camera.
-2. Scan the setup QR code.
-3. Allow the microphone and notifications. Full-screen alerts are requested so a locked
+1. Install the APK and open it. The phone list is empty until you add one.
+2. Tap Add phone and allow the camera.
+3. Scan the setup QR code.
+4. Allow the microphone and notifications. Full-screen alerts are requested so a locked
    phone can show the answer screen. A line that push cannot wake stays registered in a
    foreground service.
 

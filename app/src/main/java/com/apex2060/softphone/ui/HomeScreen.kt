@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -242,6 +243,10 @@ private fun PhoneList(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    if (stored.isEmpty()) {
+        EmptyPhones(onAdd, modifier)
+        return
+    }
     val allOff = stored.none { it.enabled }
     LazyColumn(modifier.navigationBarsPadding()) {
         if (allOff) {
@@ -276,6 +281,34 @@ private fun PhoneList(
                 },
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             ) { Text("Add phone") }
+        }
+    }
+}
+
+@Composable
+private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .fillMaxSize()
+            .navigationBarsPadding()
+            .padding(horizontal = 32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "No phones yet",
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            "Add a phone by scanning its setup QR code.",
+            modifier = Modifier.padding(top = 8.dp),
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(onClick = onAdd, modifier = Modifier.padding(top = 24.dp)) {
+            Text("Add phone")
         }
     }
 }

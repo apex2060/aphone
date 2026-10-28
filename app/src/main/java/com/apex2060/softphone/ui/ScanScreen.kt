@@ -68,9 +68,9 @@ private sealed interface ScanState {
     data class Error(val message: String) : ScanState
 }
 
-/** First-time setup, or adding another phone when [onCancel] is set. */
+/** QR setup. Opened only from Add phone, so the camera permission is asked here. */
 @Composable
-fun ScanScreen(onCancel: (() -> Unit)? = null) {
+fun ScanScreen(onCancel: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var hasCamera by remember {
@@ -81,7 +81,7 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCamera = it }
     LaunchedEffect(Unit) { if (!hasCamera) permission.launch(Manifest.permission.CAMERA) }
     var state by remember { mutableStateOf<ScanState>(ScanState.Scanning) }
-    BackHandler(enabled = onCancel != null) { onCancel?.invoke() }
+    BackHandler { onCancel() }
 
     fun onCode(text: String) {
         if (state != ScanState.Scanning) return
@@ -99,12 +99,12 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
                     LineChange.UPDATED -> {
                         PushRuntime.sync(context)
                         Toast.makeText(context, "Phone updated", Toast.LENGTH_SHORT).show()
-                        onCancel?.invoke()
+                        onCancel()
                         ScanState.Scanning
                     }
                     LineChange.ADDED -> {
                         PushRuntime.sync(context)
-                        onCancel?.invoke()
+                        onCancel()
                         ScanState.Scanning
                     }
                 }
@@ -142,16 +142,14 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
                 }
             }
             if (!hasCamera) Button(onClick = { permission.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
-            if (onCancel != null) TextButton(onClick = onCancel) { Text("Cancel", color = Color.White) }
+            TextButton(onClick = onCancel) { Text("Cancel", color = Color.White) }
         }
         Surface(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
                 .padding(top = 12.dp)
-                .then(
-                    if (onCancel != null) Modifier.clickable(onClickLabel = "Phones", onClick = onCancel) else Modifier,
-                ),
+                .clickable(onClickLabel = "Phones", onClick = onCancel),
             shape = RoundedCornerShape(16.dp),
             color = Color.White,
         ) {

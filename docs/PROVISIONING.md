@@ -1,8 +1,8 @@
 # Provisioning
 
-A fresh install shows only a QR scanner. Scanning a setup code makes the phone fetch a JSON
-document from your server, save it, register with Plivo, and switch to the dialer. The phone
-stays provisioned across reboots and app updates until it is reset or revoked.
+A fresh install opens the phone list. Tap Add phone and scan a setup code. The phone fetches a
+JSON document from your server, saves it, registers with Plivo, and returns to the list. The
+phone stays provisioned across reboots and app updates until it is reset or revoked.
 
 ## 1. The QR code
 
