@@ -88,14 +88,32 @@ object PushClient {
     }
 }
 
-/** Fields added to phone.provision when a token already exists. Omitted until then. */
-fun JSONObject.putPushFields(token: String?) {
-    if (token.isNullOrBlank()) return
-    put("fcmToken", token)
-    put("platform", "android")
-    put("appVersion", BuildConfig.VERSION_NAME)
-    put("deviceId", ConfigStore.deviceId())
+/**
+ * Adds the push fields and returns this object. Must return the JSONObject:
+ * a Unit return makes a chained `.toString()` send the text "kotlin.Unit".
+ */
+fun JSONObject.putPushFields(token: String?, appVersion: String, deviceId: String): JSONObject {
+    if (!token.isNullOrBlank()) {
+        put("fcmToken", token)
+        put("platform", "android")
+        put("appVersion", appVersion)
+        put("deviceId", deviceId)
+    }
+    return this
 }
+
+/** JSON body for phone.provision. Always a JSON object, never a Unit string. */
+fun provisionRequestBody(
+    key: String,
+    device: JSONObject,
+    token: String?,
+    appVersion: String,
+    deviceId: String,
+): String = JSONObject()
+    .put("key", key)
+    .put("device", device)
+    .putPushFields(token, appVersion, deviceId)
+    .toString()
 
 /** Keeps the ticket URL and replaces only the action, for callers that already hold a ticket. */
 fun ProvisionTicket.forAction(action: String): ProvisionTicket =

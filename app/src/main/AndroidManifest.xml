@@ -18,8 +18,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
-    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
@@ -55,10 +54,10 @@
         <service
             android:name=".phone.PhoneService"
             android:exported="false"
-            android:foregroundServiceType="phoneCall|microphone|specialUse">
+            android:foregroundServiceType="shortService|microphone|specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps SIP registration alive for VoIP lines that are switched on, so incoming calls can arrive. Stops when every line is off." />
+                android:value="Keeps SIP registration alive for lines that cannot be woken by push, so incoming calls can arrive. Stops when every such line is off." />
         </service>
 
         <service
@@ -66,15 +65,6 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
-            </intent-filter>
-        </service>
-
-        <service
-            android:name=".phone.OwnCallService"
-            android:exported="true"
-            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
-            <intent-filter>
-                <action android:name="android.telecom.ConnectionService" />
             </intent-filter>
         </service>
 

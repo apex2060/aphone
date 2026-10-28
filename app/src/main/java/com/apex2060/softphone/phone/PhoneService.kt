@@ -42,6 +42,7 @@ import kotlinx.coroutines.launch
 
 /** Keeps registration up, rings, and refreshes the provisioning document. */
 class PhoneService : Service() {
+    enum class FgsMode { SHORT, MICROPHONE, SPECIAL }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var lastPhase: CallPhase? = null
     private var ringing = false
@@ -51,7 +52,6 @@ class PhoneService : Service() {
     private var vibrator: Vibrator? = null
     private var screenWake: PowerManager.WakeLock? = null
     private var stayAwake: PowerManager.WakeLock? = null
-    private var telecomAsked = false
 
     private val engine get() = (application as SoftphoneApp).engine
 
@@ -59,8 +59,8 @@ class PhoneService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        goForeground(Notifications.status(this, engine.registration.value, null), mic = false, call = nextWakeIsCall)
-        nextWakeIsCall = false
+        goForeground(Notifications.status(this, engine.registration.value, null), mode = nextMode ?: idleMode())
+        nextMode = null
         if (!ConfigStore.anyEnabled()) {
             stopSelf()
             return
@@ -114,6 +114,10 @@ class PhoneService : Service() {
         when (intent?.action) {
             ACTION_DECLINE -> engine.decline()
             ACTION_HANGUP -> engine.hangup()
+            ACTION_PROMOTE -> goForeground(
+                Notifications.status(this, engine.registration.value, engine.call.value),
+                mode = FgsMode.MICROPHONE,
+            )
         }
         return START_STICKY
     }
@@ -131,10 +135,6 @@ class PhoneService : Service() {
         if (incoming != null) {
             val who = incoming.callerName?.ifBlank { null } ?: incoming.number
             nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, who, incoming.lineLabel))
-            if (!telecomAsked) {
-                telecomAsked = true
-                OwnCalls.addIncoming(this, incoming.number)
-            }
             startRing(incoming.number)
         } else {
             stopRing()
@@ -152,12 +152,13 @@ class PhoneService : Service() {
             dismissCallNotifications(nm)
         }
         callNotificationPosted = callChrome
-        if (call?.phase == CallPhase.ACTIVE) OwnCalls.active()
-        if (!callChrome) {
-            telecomAsked = false
-            OwnCalls.close()
+        val mode = modeFor(call)
+        if (mode == null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
         }
-        goForeground(Notifications.status(this, reg, call), mic = inCall, call = callChrome)
+        goForeground(Notifications.status(this, reg, call), mode = mode)
     }
 
     private fun dismissCallNotifications(nm: NotificationManager) {
@@ -234,24 +235,37 @@ class PhoneService : Service() {
         screenWake = null
     }
 
-    private fun goForeground(notification: android.app.Notification, mic: Boolean, call: Boolean) {
-        // phoneCall covers a ringing or active call. specialUse is only the no-push
-        // always-on registration. microphone is added only while a call is capturing audio.
-        val phone = if (call && Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL else 0
-        val special = if (!call && Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-        val withMic = if (mic && Build.VERSION.SDK_INT >= 30) {
-            phone or special or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        } else {
-            phone or special
+    private fun idleMode(): FgsMode = if (PushGate.needsIdleService()) FgsMode.SPECIAL else FgsMode.SHORT
+
+    /** Microphone only while a call is up and the app is on screen. Ringing stays a short service. */
+    private fun modeFor(call: com.apex2060.softphone.CallUi?): FgsMode? {
+        val phase = call?.phase
+        val outgoing = phase == CallPhase.DIALING || phase == CallPhase.RINGING_OUT
+        val answered = phase == CallPhase.ACTIVE && engine.isAppForeground()
+        return when {
+            outgoing || answered -> FgsMode.MICROPHONE
+            phase == CallPhase.RINGING_IN || engine.isAwake() -> FgsMode.SHORT
+            PushGate.needsIdleService() -> FgsMode.SPECIAL
+            else -> null
+        }
+    }
+
+    private fun goForeground(notification: android.app.Notification, mode: FgsMode) {
+        val type = when (mode) {
+            FgsMode.SHORT -> if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE else 0
+            FgsMode.MICROPHONE -> if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+            FgsMode.SPECIAL -> if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         }
         try {
-            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, withMic)
-            if (call) SpikeLog.append("fgs phoneCall")
+            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, type)
+            SpikeLog.append("fgs ${mode.name.lowercase()}")
         } catch (e: Exception) {
-            val fallback = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-            SpikeLog.append(
-                "push fgs denied ${e.javaClass.simpleName}: ${e.message} (call is not hung up)"
-            )
+            val fallback = if (Build.VERSION.SDK_INT >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE
+            } else {
+                0
+            }
+            SpikeLog.append("fgs ${mode.name.lowercase()} refused: ${e.javaClass.simpleName}: ${e.message}")
             ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, fallback)
         }
     }
@@ -281,21 +295,43 @@ class PhoneService : Service() {
         const val ACTION_DECLINE = "com.apex2060.softphone.DECLINE"
         const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
         const val ACTION_PUSH = "com.apex2060.softphone.PUSH"
+        const val ACTION_PROMOTE = "com.apex2060.softphone.PROMOTE"
 
         @Volatile
-        var nextWakeIsCall = false
+        var nextMode: FgsMode? = null
 
         fun start(context: Context) {
             if (!ConfigStore.anyEnabled() || !PushGate.needsIdleService()) return
+            nextMode = FgsMode.SPECIAL
             ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
         }
 
-        /** High-priority FCM wake. The foreground service starts before SIP registration. */
+        /** High-priority FCM wake. shortService keeps the process up until the user answers. */
         fun startForPush(context: Context) {
-            nextWakeIsCall = true
+            nextMode = FgsMode.SHORT
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, PhoneService::class.java).setAction(ACTION_PUSH),
+            )
+        }
+
+        /** Outgoing call from the dialer, which is already on screen. */
+        fun startForOutgoing(context: Context) {
+            nextMode = FgsMode.MICROPHONE
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_PROMOTE),
+            )
+        }
+
+        /** Answer screen became visible, so the microphone type is allowed. */
+        fun promoteMicrophone(context: Context) {
+            val phase = (context.applicationContext as SoftphoneApp).engine.call.value?.phase ?: return
+            if (phase != CallPhase.ACTIVE && phase != CallPhase.DIALING && phase != CallPhase.RINGING_OUT) return
+            nextMode = FgsMode.MICROPHONE
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_PROMOTE),
             )
         }
 

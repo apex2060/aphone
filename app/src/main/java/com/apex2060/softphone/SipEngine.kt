@@ -321,6 +321,7 @@ class SipEngine(private val app: Application) {
                     startLine(held, creds.first, creds.second)
                 }
             }
+            com.apex2060.softphone.phone.PhoneService.startForOutgoing(app)
             return true
         }
         _call.value = ui
@@ -336,6 +337,7 @@ class SipEngine(private val app: Application) {
                 "allowFreeDial=${stored.config.allowFreeDial} route=${route.label}"
         )
         pjsip.post { placeCall(ui, viaClient = route == OutboundRoute.VIA_CLIENT) }
+        com.apex2060.softphone.phone.PhoneService.startForOutgoing(app)
         return true
     }
 

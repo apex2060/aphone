@@ -4,8 +4,8 @@ import android.os.Build
 import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.push.ProvisionActions
-import com.apex2060.softphone.push.putPushFields
 import com.apex2060.softphone.push.PushRuntime
+import com.apex2060.softphone.push.provisionRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -47,17 +47,17 @@ object Provisioner {
             conn.connectTimeout = 15_000
             conn.readTimeout = 15_000
             conn.setRequestProperty("Accept", "application/json")
-            val body = if (ticket.key != null) {
-                JSONObject()
-                    .put("key", ticket.key)
-                    .put("device", JSONObject()
+            val body = ticket.key?.let { key ->
+                provisionRequestBody(
+                    key = key,
+                    device = JSONObject()
                         .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
                         .put("android", Build.VERSION.RELEASE)
-                        .put("app", BuildConfig.VERSION_NAME))
-                    .putPushFields(PushRuntime.tokenForProvision(ticket.url))
-                    .toString()
-            } else {
-                null
+                        .put("app", BuildConfig.VERSION_NAME),
+                    token = PushRuntime.tokenForProvision(ticket.url),
+                    appVersion = BuildConfig.VERSION_NAME,
+                    deviceId = ConfigStore.deviceId(),
+                )
             }
             SpikeLog.append(
                 "provision request ${if (body != null) "POST" else "GET"} ${ticket.url}" +

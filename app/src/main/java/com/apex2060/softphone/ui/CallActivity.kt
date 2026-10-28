@@ -99,6 +99,7 @@ class CallActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         (application as SoftphoneApp).engine.onActivityStarted()
+        com.apex2060.softphone.phone.PhoneService.promoteMicrophone(this)
     }
 
     override fun onStop() {
