@@ -56,7 +56,10 @@ object PushRuntime {
 
     /** Token already fetched for this ticket's line, if any. Omitted from the first provision. */
     fun tokenForProvision(url: String): String? {
-        val line = ConfigStore.lines.value.firstOrNull { it.ticketUrl == url } ?: return null
+        val want = ProvisionActions.stripVersionQuery(url)
+        val line = ConfigStore.lines.value.firstOrNull {
+            ProvisionActions.stripVersionQuery(it.ticketUrl.orEmpty()) == want
+        } ?: return null
         val project = line.config.push?.projectId
         return if (project != null) tokens[project] else tokens[PushApps.DEFAULT]
     }

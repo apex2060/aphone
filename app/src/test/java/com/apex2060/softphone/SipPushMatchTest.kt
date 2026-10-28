@@ -34,6 +34,23 @@ class SipPushMatchTest {
     }
 
     @Test
+    fun versionPinsAreStrippedFromProvisionUrls() {
+        assertEquals(
+            "https://phones.example.com/_comm?action=phone.provision",
+            ProvisionActions.stripVersionQuery(
+                "https://phones.example.com/_comm?action=phone.provision&v=12&c=draft",
+            ),
+        )
+        assertEquals(
+            "https://phones.example.com/_comm?key=front&action=phone.token",
+            ProvisionActions.withAction(
+                "https://phones.example.com/_comm?v=9&action=phone.provision&c=preview&key=front",
+                "phone.token",
+            ),
+        )
+    }
+
+    @Test
     fun actionReplacesOnlyTheActionQuery() {
         assertEquals(
             "https://phones.example.com/_comm?key=front&action=phone.token",

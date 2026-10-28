@@ -1,5 +1,6 @@
 package com.apex2060.softphone.phone
 
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
@@ -24,7 +25,6 @@ import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.Provisioner
-import com.apex2060.softphone.push.PushGate
 import com.apex2060.softphone.push.PushRuntime
 import com.apex2060.softphone.config.RevokedException
 import com.apex2060.softphone.history.CallHistory
@@ -43,7 +43,7 @@ import kotlinx.coroutines.launch
 
 /** Keeps registration up, rings, and refreshes the provisioning document. */
 class PhoneService : Service() {
-    enum class FgsMode { SHORT, MICROPHONE, SPECIAL }
+    enum class FgsMode { SHORT, MICROPHONE }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var lastPhase: CallPhase? = null
     private var ringing = false
@@ -83,7 +83,7 @@ class PhoneService : Service() {
                 .distinctUntilChanged()
                 .collect { wanted ->
                     engine.syncEnabledLines()
-                    if (wanted.isEmpty() || (!PushGate.needsIdleService() && !engine.isAwake() && engine.call.value == null)) {
+                    if (wanted.isEmpty() || (!engine.isAwake() && engine.call.value == null)) {
                         stopSelf()
                     }
                 }
@@ -134,8 +134,7 @@ class PhoneService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         val incoming = call?.takeIf { it.phase == CallPhase.RINGING_IN }
         if (incoming != null) {
-            val who = incoming.callerName?.ifBlank { null } ?: incoming.number
-            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, who, incoming.lineLabel))
+            syncIncomingAlert(this)
             startRing(incoming.number)
         } else {
             stopRing()
@@ -236,7 +235,7 @@ class PhoneService : Service() {
         screenWake = null
     }
 
-    private fun idleMode(): FgsMode = if (PushGate.needsIdleService()) FgsMode.SPECIAL else FgsMode.SHORT
+    private fun idleMode(): FgsMode = FgsMode.SHORT
 
     /** Microphone only while a call is up and the app is on screen. Ringing stays a short service. */
     private fun modeFor(call: com.apex2060.softphone.CallUi?): FgsMode? {
@@ -246,7 +245,6 @@ class PhoneService : Service() {
         return when {
             outgoing || answered -> FgsMode.MICROPHONE
             phase == CallPhase.RINGING_IN || engine.isAwake() -> FgsMode.SHORT
-            PushGate.needsIdleService() -> FgsMode.SPECIAL
             else -> null
         }
     }
@@ -255,7 +253,6 @@ class PhoneService : Service() {
         val type = when (mode) {
             FgsMode.SHORT -> if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE else 0
             FgsMode.MICROPHONE -> if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
-            FgsMode.SPECIAL -> if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         }
         try {
             ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, type)
@@ -301,10 +298,26 @@ class PhoneService : Service() {
         @Volatile
         var nextMode: FgsMode? = null
 
-        fun start(context: Context) {
-            if (!ConfigStore.anyEnabled() || !PushGate.needsIdleService()) return
-            nextMode = FgsMode.SPECIAL
-            ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
+        /**
+         * Heads-up plus full-screen intent only when the call screen is not already
+         * in front of an unlocked phone. Answer and decline both end the ring, and
+         * [render] cancels this notification.
+         */
+        fun syncIncomingAlert(context: Context) {
+            val app = context.applicationContext as SoftphoneApp
+            val nm = context.getSystemService(NotificationManager::class.java)
+            val incoming = app.engine.call.value?.takeIf { it.phase == CallPhase.RINGING_IN }
+            if (incoming == null) {
+                nm.cancel(Notifications.ID_INCOMING)
+                return
+            }
+            val locked = context.getSystemService(KeyguardManager::class.java).isKeyguardLocked
+            if (!app.engine.isAppForeground() || locked) {
+                val who = incoming.callerName?.ifBlank { null } ?: incoming.number
+                nm.notify(Notifications.ID_INCOMING, Notifications.incoming(context, who, incoming.lineLabel))
+            } else {
+                nm.cancel(Notifications.ID_INCOMING)
+            }
         }
 
         /** High-priority FCM wake. shortService keeps the process up until the user answers. */
@@ -340,13 +353,12 @@ class PhoneService : Service() {
             val app = context.applicationContext as SoftphoneApp
             val call = app.engine.call.value
             val inCall = call != null && call.phase != CallPhase.ENDED
-            if (PushGate.needsIdleService() || app.engine.isAwake() || inCall) return
+            if (app.engine.isAwake() || inCall) return
             context.stopService(Intent(context, PhoneService::class.java))
         }
 
         fun turnOn(context: Context, lineId: String) {
             ConfigStore.setEnabled(lineId, true)
-            start(context)
             PushRuntime.sync(context.applicationContext)
         }
 

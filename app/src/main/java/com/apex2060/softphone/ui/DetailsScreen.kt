@@ -131,10 +131,7 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
                 StatusLine("Registration", regText)
                 StatusLine(
                     "Username",
-                    UiText.scrub(
-                        (status?.username?.ifBlank { line.config.sipUsername } ?: line.config.sipUsername) +
-                            if (line.manualCreds() != null) " (manual)" else "",
-                    ),
+                    UiText.scrub(status?.username?.ifBlank { line.config.sipUsername } ?: line.config.sipUsername),
                 )
                 StatusLine("Network", UiText.networkIndicator(network).ifBlank { "—" })
                 StatusLine("Transport", UiText.scrub(status?.transport ?: "auto"))
@@ -206,11 +203,10 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
     }
     if (confirmRemove) {
         RemoveDialog(
-            pinRequired = line.config.adminPin,
             onDismiss = { confirmRemove = false },
             onConfirm = {
                 confirmRemove = false
-                PhoneService.removeLine(context, lineId)
+                PhoneService.resetLine(context, lineId)
                 onBack()
             },
         )
@@ -346,32 +342,13 @@ private fun RecordingPinDialog(accept: (String) -> Boolean, onDismiss: () -> Uni
 }
 
 @Composable
-private fun RemoveDialog(pinRequired: String?, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    var pin by remember { mutableStateOf("") }
-    var wrong by remember { mutableStateOf(false) }
+private fun RemoveDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Remove this phone?") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("This unregisters it on this device. Other phones stay as they are.")
-                if (pinRequired != null) {
-                    OutlinedTextField(
-                        value = pin,
-                        onValueChange = { pin = it; wrong = false },
-                        label = { Text("Admin PIN") },
-                        isError = wrong,
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    )
-                }
-            }
-        },
+        text = { Text("This unregisters it on this device and deletes its saved setup. Other phones stay as they are.") },
         confirmButton = {
-            TextButton(onClick = {
-                if (pinRequired == null || pin == pinRequired) onConfirm() else wrong = true
-            }) { Text("Remove", color = LocalCallColors.current.decline) }
+            TextButton(onClick = onConfirm) { Text("Remove", color = LocalCallColors.current.decline) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

@@ -99,11 +99,18 @@ class CallActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         (application as SoftphoneApp).engine.onActivityStarted()
+        com.apex2060.softphone.phone.PhoneService.syncIncomingAlert(this)
         com.apex2060.softphone.phone.PhoneService.promoteMicrophone(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        com.apex2060.softphone.phone.PhoneService.syncIncomingAlert(this)
     }
 
     override fun onStop() {
         (application as SoftphoneApp).engine.onActivityStopped()
+        com.apex2060.softphone.phone.PhoneService.syncIncomingAlert(this)
         super.onStop()
     }
 

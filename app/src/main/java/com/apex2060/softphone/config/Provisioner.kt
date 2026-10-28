@@ -30,9 +30,10 @@ object Provisioner {
         val ticket = when {
             t.startsWith("{") -> runCatching {
                 val o = JSONObject(t)
-                ProvisionTicket(o.getString("url"), o.optString("key").ifBlank { null })
+                ProvisionTicket(ProvisionActions.stripVersionQuery(o.getString("url")), o.optString("key").ifBlank { null })
             }.getOrNull()
-            t.startsWith("https://") || t.startsWith("http://") -> ProvisionTicket(t, null)
+            t.startsWith("https://") || t.startsWith("http://") ->
+                ProvisionTicket(ProvisionActions.stripVersionQuery(t), null)
             else -> null
         } ?: return null
         val secure = ticket.url.startsWith("https://")
@@ -42,7 +43,8 @@ object Provisioner {
     /** Fetches the provisioning document. Returns the raw JSON and the parsed config. */
     suspend fun fetch(ticket: ProvisionTicket): Pair<String, ProvisionConfig> = withContext(Dispatchers.IO) {
         SpikeLog.noteSecret(ticket.key)
-        val conn = URL(ticket.url).openConnection() as HttpURLConnection
+        val requestUrl = ProvisionActions.stripVersionQuery(ticket.url)
+        val conn = URL(requestUrl).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 15_000
             conn.readTimeout = 15_000
@@ -54,13 +56,13 @@ object Provisioner {
                         .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
                         .put("android", Build.VERSION.RELEASE)
                         .put("app", BuildConfig.VERSION_NAME),
-                    token = PushRuntime.tokenForProvision(ticket.url),
+                    token = PushRuntime.tokenForProvision(requestUrl),
                     appVersion = BuildConfig.VERSION_NAME,
                     deviceId = ConfigStore.deviceId(),
                 )
             }
             SpikeLog.append(
-                "provision request ${if (body != null) "POST" else "GET"} ${ticket.url}" +
+                "provision request ${if (body != null) "POST" else "GET"} ${requestUrl}" +
                     (if (ticket.key != null) "\nX-Provision-Key: [redacted]" else "")
             )
             if (body != null) {

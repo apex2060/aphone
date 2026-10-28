@@ -1796,7 +1796,6 @@ class SipEngine(private val app: Application) {
                 remembered = remembered?.uiLabel ?: "none",
                 signature = reg?.planSig?.ifBlank { cur.signature } ?: cur.signature,
                 username = reg?.username?.ifBlank { cur.username } ?: cur.username,
-                manual = stored?.manualCreds() != null,
                 outbound = stored?.route()?.uiLabel ?: cur.outbound,
                 network = _network.value.ifBlank { cur.network },
             ))
@@ -1812,7 +1811,6 @@ class SipEngine(private val app: Application) {
                 registration = registration,
                 status = status,
                 username = reg?.username?.ifBlank { stored?.resolvedCreds()?.first.orEmpty() } ?: cur.username,
-                manual = stored?.manualCreds() != null,
                 nativeError = nativeError,
                 network = _network.value.ifBlank { cur.network },
                 outbound = stored?.route()?.uiLabel ?: cur.outbound,

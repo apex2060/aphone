@@ -161,13 +161,16 @@ named `X-Call-UUID` or any `X-PH-` header whose name contains `Call-UUID`, case-
 | Status | Phone behaviour |
 |---|---|
 | `200` | Save the document and (re)register. |
-| `410 Gone` | The phone wipes its line and history and returns to the scanner. Use this to retire a device. |
+| `410 Gone` | The phone removes that line and its history. Use this to retire a device. |
 | anything else | Setup shows the error; a background refresh keeps the current config and tries again later. |
 
-## 3. Resetting a phone
+## 3. Removing a phone
 
-Long-press the coloured title bar and enter the admin PIN. This removes the line and the call
-history and returns to the scanner.
+Each phone on the list has Remove. Confirming it unregisters that line and deletes its saved
+setup and call history on this device. No admin PIN. The admin PIN still guards auto-record.
+
+`v` and `c` query parameters on a setup URL are removed before every `phone.*` request,
+including URLs saved from an earlier scan. Host and path stay. The request keeps `action`.
 
 ## 4. Plivo side
 

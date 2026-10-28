@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.apex2060.softphone.OutboundRoute
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.TransportMode
+import com.apex2060.softphone.push.ProvisionActions
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
@@ -32,17 +33,12 @@ data class StoredLine(
     val transportWins: Map<String, String>,
 ) {
     val ticket: ProvisionTicket?
-        get() = ticketUrl?.takeIf { it.isNotBlank() }?.let { ProvisionTicket(it, ticketKey) }
+        get() = ticketUrl?.takeIf { it.isNotBlank() }?.let {
+            ProvisionTicket(ProvisionActions.stripVersionQuery(it), ticketKey)
+        }
 
-    fun manualCreds(): Pair<String, String>? {
-        val user = manualUser?.trim().orEmpty()
-        val pass = manualPass.orEmpty()
-        return if (user.isNotEmpty() && pass.isNotEmpty()) user to pass else null
-    }
-
-    /** Manual fallback wins when set. Otherwise the provisioned SIP user. */
+    /** SIP username and password from the provisioning document. */
     fun resolvedCreds(): Pair<String, String>? {
-        manualCreds()?.let { return it }
         if (config.sipUsername.isEmpty() || config.sipPassword.isEmpty()) return null
         return config.sipUsername to config.sipPassword
     }
@@ -197,13 +193,6 @@ object ConfigStore {
         it.copy(transportWins = it.transportWins - signature)
     }
 
-    fun setManual(id: String, user: String, pass: String) {
-        SpikeLog.noteSecret(pass)
-        update(id) { it.copy(manualUser = user.trim(), manualPass = pass) }
-    }
-
-    fun clearManual(id: String) = update(id) { it.copy(manualUser = null, manualPass = null) }
-
     /**
      * App-wide. Missing key means off, so a fresh install does not record.
      * An upgrade that already stored true stays on.
@@ -264,7 +253,6 @@ object ConfigStore {
         for (line in lines) {
             SpikeLog.noteSecret(line.config.sipPassword)
             line.ticketKey?.let { SpikeLog.noteSecret(it) }
-            line.manualPass?.let { SpikeLog.noteSecret(it) }
         }
     }
 
@@ -278,7 +266,7 @@ object ConfigStore {
         return copy(
             rawJson = json,
             config = config,
-            ticketUrl = ticket.url,
+            ticketUrl = ProvisionActions.stripVersionQuery(ticket.url),
             ticketKey = ticket.key,
             refreshedAt = System.currentTimeMillis(),
         )
@@ -289,7 +277,7 @@ object ConfigStore {
             id = UUID.randomUUID().toString(),
             rawJson = json,
             config = config,
-            ticketUrl = ticket.url,
+            ticketUrl = ProvisionActions.stripVersionQuery(ticket.url),
             ticketKey = ticket.key,
             refreshedAt = System.currentTimeMillis(),
             enabled = true,
@@ -317,15 +305,16 @@ object ConfigStore {
             id = UUID.randomUUID().toString(),
             rawJson = json,
             config = config,
-            ticketUrl = prefs.getString(KEY_URL, null)?.takeIf { it.isNotBlank() },
+            ticketUrl = prefs.getString(KEY_URL, null)?.takeIf { it.isNotBlank() }
+                ?.let(ProvisionActions::stripVersionQuery),
             ticketKey = prefs.getString(KEY_SECRET, null),
             refreshedAt = prefs.getLong(KEY_REFRESHED, 0),
             enabled = prefs.getBoolean(KEY_PHONE, true),
             transportOverride = prefs.getString(KEY_OVERRIDE, null)?.takeIf { it.isNotBlank() },
             outboundRoute = prefs.getString(KEY_OUTBOUND, null)?.takeIf { it.isNotBlank() }
                 ?: OutboundRoute.DIRECT.name,
-            manualUser = prefs.getString(KEY_MANUAL_USER, null)?.takeIf { it.isNotBlank() },
-            manualPass = prefs.getString(KEY_MANUAL_PASS, null)?.takeIf { it.isNotEmpty() },
+            manualUser = null,
+            manualPass = null,
             transportWins = LineLogic.legacyWins(prefs.all),
         )
         prefs.edit().putString(KEY_LINES, encode(listOf(line))).apply()
@@ -349,8 +338,6 @@ object ConfigStore {
                     .put("enabled", line.enabled)
                     .put("transportOverride", line.transportOverride.orEmpty())
                     .put("outboundRoute", line.outboundRoute)
-                    .put("manualUser", line.manualUser.orEmpty())
-                    .put("manualPass", line.manualPass.orEmpty())
                     .put("wins", wins),
             )
         }
@@ -383,14 +370,14 @@ object ConfigStore {
                 id = o.optString("id").ifBlank { UUID.randomUUID().toString() },
                 rawJson = json,
                 config = config,
-                ticketUrl = o.optString("url").ifBlank { null },
+                ticketUrl = o.optString("url").ifBlank { null }?.let(ProvisionActions::stripVersionQuery),
                 ticketKey = o.optString("key").ifBlank { null },
                 refreshedAt = o.optLong("refreshedAt"),
                 enabled = o.optBoolean("enabled", true),
                 transportOverride = o.optString("transportOverride").ifBlank { null },
                 outboundRoute = o.optString("outboundRoute").ifBlank { OutboundRoute.DIRECT.name },
-                manualUser = o.optString("manualUser").ifBlank { null },
-                manualPass = o.optString("manualPass").ifBlank { null },
+                manualUser = null,
+                manualPass = null,
                 transportWins = wins,
             )
         }

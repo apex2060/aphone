@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: "versionName when this run is not a tag (optional, for example 1.3.6)"
+        description: "versionName when this run is not a tag (optional, for example 1.3.7)"
         required: false
         type: string
       version_code:
-        description: "versionCode when this run is not a tag (optional, for example 27)"
+        description: "versionCode when this run is not a tag (optional, for example 28)"
         required: false
         type: string
 

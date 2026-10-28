@@ -22,7 +22,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
-import com.apex2060.softphone.phone.PhoneService
 import com.apex2060.softphone.record.Recordings
 
 class MainActivity : ComponentActivity() {
@@ -47,7 +46,6 @@ class MainActivity : ComponentActivity() {
                 }
                 LaunchedEffect(stored.joinToString { it.id }) {
                     if (stored.isEmpty()) return@LaunchedEffect
-                    if (ConfigStore.anyEnabled()) PhoneService.start(this@MainActivity)
                     val wanted = buildList {
                         add(Manifest.permission.RECORD_AUDIO)
                         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)

@@ -11,13 +11,14 @@ and becomes a dialer that makes calls, rings for incoming calls, and keeps a cal
   The Plivo Android SDK is not part of this app. Credentials are still the endpoint username
   and password from the provisioning document.
 * **Incoming calls:** with Firebase configured, a high-priority data push wakes the phone,
-  which registers, tells the server it is ready, and rings. Without `google-services.json`,
-  a foreground service keeps the registration open. Either way the ring is a full-screen
-  notification with Answer and Decline, and missed calls are logged.
+  which registers, tells the server it is ready, and rings. The in-app call screen is the
+  only prompt while the phone is unlocked and the app is in front. A notification with
+  Answer and Decline is used when the app is in the background or the screen is locked.
 * **History:** a local SQLite log of incoming, outgoing, missed and declined calls, with tap to call back.
 * **Remote control of the fleet:** the phone re-fetches its document every `refreshHours`, and
   an HTTP `410` from your server removes that phone from the list.
-* **Reset:** long-press the title bar and enter the admin PIN.
+* **Remove:** each phone has a Remove button. Confirming it unregisters that line and
+  deletes its saved setup on this device. No admin PIN. The admin PIN still guards auto-record.
 
 Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and optional
 Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The Play application id is
@@ -30,8 +31,8 @@ Lines without `push` use the default app from `app/google-services.json` when th
 present at build time. That file is not in git. It must include an Android client whose
 `package_name` is `us.alphabetize.phone22` (Firebase project homeschool-express). CI reads it
 from the `GOOGLE_SERVICES_JSON_BASE64` secret and fails if that package is missing. If a line
-has neither its own `push` object nor that default client, push stays off and that line keeps
-the always-on registration.
+has neither its own `push` object nor that default client, incoming calls are not woken in
+the background. Placing a call still registers that line.
 
 Release builds accept only `https://` provisioning URLs. Debug builds also accept `http://` so a
 phone on the same LAN can reach the sample server.
@@ -55,8 +56,8 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.6` and `versionCode` defaults to `27`. A manual Build APK run
-uses the `version_name` and `version_code` inputs (for example `1.3.6` and `27`). A tag run
+`versionName` defaults to `1.3.7` and `versionCode` defaults to `28`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.7` and `28`). A tag run
 uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
 Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
 never committed.
@@ -128,7 +129,7 @@ uninstall the old one, then scan the QR again.
 ```
 app/src/main/java/com/apex2060/softphone/
   config/   ProvisionConfig (schema), Provisioner (QR + HTTP), ConfigStore (persistence)
-  phone/    PhoneService (foreground service), Notifications, BootReceiver
+  phone/    PhoneService (foreground service), Notifications
   SipEngine.kt and the classes next to it  PJSIP registration, calls, and the on/off switch
   history/  CallHistory (SQLite)
   ui/       MainActivity, ScanScreen, HomeScreen (keypad, contacts, recents), CallActivity, Theme
@@ -148,8 +149,8 @@ GPL-2.0-only. The Open-source licenses screen in the app lists the same notices.
 
 ## Known limits
 
-* A line without push depends on its foreground service staying connected. Android may still
-  defer that service while the phone is optimizing battery use.
+* A line without push is not kept registered in the background. It registers when you place
+  a call. Incoming calls need a push wake-up.
 * A line with push registers when a high-priority data message arrives.
 * The native library is arm64-v8a only.
 * One call at a time. A second incoming call while busy is rejected and logged as missed.

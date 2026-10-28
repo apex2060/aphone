@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -33,7 +32,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -54,8 +52,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -164,7 +160,7 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
                         stored,
                         statuses,
                         onOpen = { place = Place.Dialer(it) },
-                        onReset = { resetId = it },
+                        onRemove = { resetId = it },
                         onAdd = onAdd,
                         modifier = Modifier.weight(1f),
                     )
@@ -185,7 +181,7 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
     }
     val resetting = stored.firstOrNull { it.id == resetId }
     if (resetting != null) {
-        ResetDialog(resetting, onDismiss = { resetId = null })
+        RemoveLineDialog(resetting, onDismiss = { resetId = null })
     }
 }
 
@@ -238,7 +234,7 @@ private fun PhoneList(
     stored: List<StoredLine>,
     statuses: Map<String, LineUi>,
     onOpen: (String) -> Unit,
-    onReset: (String) -> Unit,
+    onRemove: (String) -> Unit,
     onAdd: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -264,7 +260,7 @@ private fun PhoneList(
                 line,
                 statuses[line.id],
                 onOpen = { onOpen(line.id) },
-                onReset = { onReset(line.id) },
+                onRemove = { onRemove(line.id) },
                 onToggle = { on ->
                     if (on) PhoneService.turnOn(context, line.id) else PhoneService.turnOff(context, line.id)
                 },
@@ -319,7 +315,7 @@ private fun PhoneCard(
     line: StoredLine,
     status: LineUi?,
     onOpen: () -> Unit,
-    onReset: () -> Unit,
+    onRemove: () -> Unit,
     onToggle: (Boolean) -> Unit,
 ) {
     val theme = line.config.theme
@@ -349,7 +345,7 @@ private fun PhoneCard(
                     .combinedClickable(
                         onClickLabel = "Open dialer",
                         onClick = onOpen,
-                        onLongClick = onReset,
+                        onLongClick = onRemove,
                     ),
             ) {
                 Text(
@@ -376,17 +372,20 @@ private fun PhoneCard(
                     Text(label, style = MaterialTheme.typography.bodySmall, color = onPrimary.copy(alpha = 0.9f))
                 }
             }
-            Switch(
-                checked = line.enabled,
-                onCheckedChange = onToggle,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = onPrimary,
-                    checkedTrackColor = onPrimary.copy(alpha = 0.38f),
-                    uncheckedThumbColor = onPrimary.copy(alpha = 0.85f),
-                    uncheckedTrackColor = onPrimary.copy(alpha = 0.18f),
-                    uncheckedBorderColor = onPrimary.copy(alpha = 0.55f),
-                ),
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                Switch(
+                    checked = line.enabled,
+                    onCheckedChange = onToggle,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = onPrimary,
+                        checkedTrackColor = onPrimary.copy(alpha = 0.38f),
+                        uncheckedThumbColor = onPrimary.copy(alpha = 0.85f),
+                        uncheckedTrackColor = onPrimary.copy(alpha = 0.18f),
+                        uncheckedBorderColor = onPrimary.copy(alpha = 0.55f),
+                    ),
+                )
+                TextButton(onClick = onRemove) { Text("Remove", color = onPrimary) }
+            }
         }
     }
 }
@@ -662,69 +661,19 @@ private fun RecentRow(
 }
 
 @Composable
-private fun ResetDialog(line: StoredLine, onDismiss: () -> Unit) {
+private fun RemoveLineDialog(line: StoredLine, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    var pin by remember { mutableStateOf("") }
-    var wrong by remember { mutableStateOf(false) }
-    var manualUser by remember { mutableStateOf("") }
-    var manualPass by remember { mutableStateOf("") }
-    val unlocked = line.config.adminPin == null || pin == line.config.adminPin
-    val others = ConfigStore.lines.value.any { it.id != line.id }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Reset this phone?") },
+        title = { Text("Remove this phone?") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    if (others) "This removes ${line.config.title} and its call history."
-                    else "This removes the line and call history. The phone returns to the setup scanner.",
-                )
-                if (line.config.adminPin != null) OutlinedTextField(
-                    value = pin,
-                    onValueChange = { pin = it; wrong = false },
-                    label = { Text("Admin PIN") },
-                    isError = wrong,
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                )
-                if (unlocked) {
-                    Text("Manual SIP login is a fallback. Leave it blank to keep using the QR line.")
-                    OutlinedTextField(
-                        value = manualUser, onValueChange = { manualUser = it },
-                        label = { Text("SIP username") }, singleLine = true,
-                    )
-                    OutlinedTextField(
-                        value = manualPass, onValueChange = { manualPass = it },
-                        label = { Text("SIP password") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                    )
-                    if (line.manualCreds() != null) {
-                        TextButton(onClick = {
-                            ConfigStore.clearManual(line.id)
-                            onDismiss()
-                        }) { Text("Use QR credentials again") }
-                    }
-                }
-            }
+            Text("This unregisters ${phoneTitle(line)} on this device and deletes its saved setup.")
         },
         confirmButton = {
-            Row {
-                if (unlocked && manualUser.isNotBlank() && manualPass.isNotEmpty()) {
-                    TextButton(onClick = {
-                        ConfigStore.setManual(line.id, manualUser, manualPass)
-                        onDismiss()
-                    }) { Text("Use manual") }
-                }
-                TextButton(onClick = {
-                    if (unlocked) {
-                        onDismiss()
-                        PhoneService.resetLine(context, line.id)
-                    } else {
-                        wrong = true
-                    }
-                }) { Text("Reset", color = LocalCallColors.current.decline) }
-            }
+            TextButton(onClick = {
+                onDismiss()
+                PhoneService.resetLine(context, line.id)
+            }) { Text("Remove", color = LocalCallColors.current.decline) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
