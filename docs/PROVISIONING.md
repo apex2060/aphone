@@ -137,11 +137,14 @@ Data messages are delivered to one messaging service for every sender. Include `
 can pick the line. `callUuid` still identifies the call. If both `endpoint` and `origin` are
 absent, any switched-on line may be woken, narrowed by `to` when that matches a number.
 
+The caller's digits are `caller`. FCM v1 rejects a data key named `from`, so do not send that
+name. The phone still accepts `from` only as a legacy fallback when `caller` is missing.
+
 ```json
 {
   "type": "incoming_call",
   "callUuid": "example-call",
-  "from": "15551234567",
+  "caller": "15551234567",
   "fromName": "Ada",
   "to": "15557654321",
   "endpoint": "frontdesk123456789",

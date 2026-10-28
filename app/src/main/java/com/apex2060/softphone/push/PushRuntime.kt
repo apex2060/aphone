@@ -93,7 +93,7 @@ object PushRuntime {
                 com.apex2060.softphone.phone.PhoneService.startForPush(context)
                 engine.wakeIncoming(
                     callUuid = callUuid,
-                    from = data["from"].orEmpty(),
+                    from = PushRoute.callerDigits(data),
                     fromName = data["fromName"].orEmpty(),
                     lineIds = lines,
                 )

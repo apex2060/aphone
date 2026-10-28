@@ -15,6 +15,16 @@ data class PushLine(
  * When both are absent, any enabled line qualifies, narrowed by `to` when that matches a number.
  */
 object PushRoute {
+    /**
+     * FCM v1 rejects a data key named `from`. Servers send `caller`.
+     * `from` is only a legacy fallback.
+     */
+    fun callerDigits(data: Map<String, String>): String {
+        val caller = data["caller"]?.trim().orEmpty()
+        if (caller.isNotEmpty()) return caller
+        return data["from"]?.trim().orEmpty()
+    }
+
     fun select(lines: List<PushLine>, endpoint: String?, origin: String?, to: String?): Set<String> {
         if (lines.isEmpty()) return emptySet()
         val user = endpoint?.trim().orEmpty()
