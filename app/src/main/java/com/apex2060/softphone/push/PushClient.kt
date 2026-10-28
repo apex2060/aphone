@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.io.IOException
 
 /** Uploads the FCM token and tells the server a pushed line has registered. */
 object PushClient {
@@ -33,17 +34,32 @@ object PushClient {
                     .put("platform", "android")
                     .put("appVersion", BuildConfig.VERSION_NAME)
                     .put("deviceId", ConfigStore.deviceId())
-                try {
-                    val code = Provisioner.postAction(ticket, "phone.token", body)
-                    SpikeLog.append("token update HTTP $code")
-                    if (code in 200..299) {
+                SpikeLog.append("token update posting")
+                val result = retryTokenPost {
+                    try {
+                        val code = Provisioner.postAction(ticket, "phone.token", body)
+                        when {
+                            code in 200..299 -> TokenAttempt.Acked
+                            code == 408 || code == 429 || code >= 500 -> TokenAttempt.Failed("HTTP $code")
+                            else -> TokenAttempt.Rejected(code)
+                        }
+                    } catch (e: RevokedException) {
+                        TokenAttempt.Revoked
+                    } catch (e: IOException) {
+                        TokenAttempt.Failed(e.message ?: "offline")
+                    }
+                }
+                when (result) {
+                    TokenAttempt.Acked -> {
+                        SpikeLog.append("token update HTTP 200")
                         ConfigStore.setPushAcked(line.id, true)
                     }
-                } catch (e: RevokedException) {
-                    SpikeLog.append("token update revoked")
-                    PhoneService.removeLine(context, line.id)
-                } catch (e: Exception) {
-                    SpikeLog.append("token update failed: ${e.message}")
+                    TokenAttempt.Revoked -> {
+                        SpikeLog.append("token update revoked")
+                        PhoneService.removeLine(context, line.id)
+                    }
+                    is TokenAttempt.Rejected -> SpikeLog.append("token update HTTP ${result.code}")
+                    is TokenAttempt.Failed -> SpikeLog.append("token update failed: ${result.reason}")
                 }
             }
             PhoneService.considerIdle(context)

@@ -8,7 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: "versionName when this run is not a tag (optional, for example 1.2.3)"
+        description: "versionName when this run is not a tag (optional, for example 1.3.0)"
+        required: false
+        type: string
+      version_code:
+        description: "versionCode when this run is not a tag (optional, for example 21)"
         required: false
         type: string
 
@@ -152,14 +156,23 @@ jobs:
         id: version
         env:
           VERSION_INPUT: ${{ inputs.version_name }}
+          VERSION_CODE_INPUT: ${{ inputs.version_code }}
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             version_name="${GITHUB_REF_NAME#v}"
-          elif [ -n "${VERSION_INPUT}" ]; then
-            version_name="${VERSION_INPUT#v}"
+            version_code="${GITHUB_RUN_NUMBER}"
           else
-            version_name="0.0.${GITHUB_RUN_NUMBER}"
+            if [ -n "${VERSION_INPUT}" ]; then
+              version_name="${VERSION_INPUT#v}"
+            else
+              version_name="0.0.${GITHUB_RUN_NUMBER}"
+            fi
+            if [ -n "${VERSION_CODE_INPUT}" ]; then
+              version_code="${VERSION_CODE_INPUT}"
+            else
+              version_code="${GITHUB_RUN_NUMBER}"
+            fi
           fi
           case "$version_name" in
             ""|*[!A-Za-z0-9.+_-]*)
@@ -167,10 +180,16 @@ jobs:
               exit 1
               ;;
           esac
+          case "$version_code" in
+            ""|*[!0-9]*)
+              echo "::error::versionCode '${version_code}' must be a positive integer."
+              exit 1
+              ;;
+          esac
           echo "version_name=${version_name}" >> "$GITHUB_OUTPUT"
-          echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
           echo "VERSION_NAME=${version_name}" >> "$GITHUB_ENV"
-          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${version_code}" >> "$GITHUB_ENV"
 
       - name: Build signed release APK and AAB
         env:
@@ -180,6 +199,11 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -f app/google-services.json ]; then
+            echo "PUSH_ENABLED=true"
+          else
+            echo "PUSH_ENABLED=false"
+          fi
           ./gradlew --no-daemon assembleRelease bundleRelease \
             -PversionName="${VERSION_NAME}" \
             -PversionCode="${VERSION_CODE}"

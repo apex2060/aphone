@@ -7,6 +7,11 @@ import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.PushConfig
 import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -15,18 +20,21 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object PushRuntime {
     private val tokens = ConcurrentHashMap<String, String>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val retryAttempt = ConcurrentHashMap<String, Int>()
 
     fun start(context: Context) = sync(context)
 
     /** Re-read every line's project and fetch its token. Safe to call after provision. */
     fun sync(context: Context) {
+        val app = context.applicationContext
         val lines = ConfigStore.lines.value
         val projects = lines.mapNotNull { it.config.push }.distinctBy { it.projectId }
         if (BuildConfig.PUSH_ENABLED) {
-            fetchDefault(context)
+            fetchDefault(app)
         }
         for (config in projects) {
-            fetchSecondary(context, config)
+            fetchSecondary(app, config)
         }
         if (!BuildConfig.PUSH_ENABLED && projects.isEmpty() && lines.isNotEmpty()) {
             SpikeLog.append("push off, no firebase project for these lines")
@@ -97,15 +105,17 @@ object PushRuntime {
     private fun fetchDefault(context: Context) {
         try {
             FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                if (!task.isSuccessful) {
-                    SpikeLog.append("push token failed: ${task.exception?.javaClass?.simpleName}")
+                if (!task.isSuccessful || task.result.isNullOrBlank()) {
+                    SpikeLog.append("push token failed: ${task.exception?.javaClass?.simpleName ?: "empty"}")
+                    retryFetch(context, PushApps.DEFAULT)
                     return@addOnCompleteListener
                 }
-                val next = task.result ?: return@addOnCompleteListener
-                onDefaultToken(context, next)
+                retryAttempt.remove(PushApps.DEFAULT)
+                onDefaultToken(context, task.result)
             }
         } catch (e: Exception) {
             SpikeLog.append("push default app unavailable: ${e.javaClass.simpleName}")
+            retryFetch(context, PushApps.DEFAULT)
         }
     }
 
@@ -114,16 +124,19 @@ object PushRuntime {
             PushApps.ensure(context, config)
         } catch (e: Exception) {
             SpikeLog.append("push app init failed project=${config.projectId}: ${e.javaClass.simpleName}")
+            retryFetch(context, config.projectId)
             return
         }
         SpikeLog.noteSecret(config.apiKey)
         SpikeLog.append("push app project=${config.projectId}")
         PushApps.messaging(app).token.addOnCompleteListener { task ->
-            if (!task.isSuccessful) {
-                SpikeLog.append("push token failed project=${config.projectId}: ${task.exception?.javaClass?.simpleName}")
+            if (!task.isSuccessful || task.result.isNullOrBlank()) {
+                SpikeLog.append("push token failed project=${config.projectId}: ${task.exception?.javaClass?.simpleName ?: "empty"}")
+                retryFetch(context, config.projectId)
                 return@addOnCompleteListener
             }
-            val next = task.result ?: return@addOnCompleteListener
+            retryAttempt.remove(config.projectId)
+            val next = task.result
             tokens[config.projectId] = next
             SpikeLog.noteSecret(next)
             val ids = ConfigStore.lines.value
@@ -131,6 +144,27 @@ object PushRuntime {
                 .map { it.id }
                 .toSet()
             if (ids.isNotEmpty()) PushClient.publish(context, next, ids)
+        }
+    }
+
+    /** Token fetch failed, usually because the radio is down. Tries again with the same backoff as phone.token. */
+    private fun retryFetch(context: Context, key: String) {
+        val next = (retryAttempt[key] ?: 0) + 1
+        if (next > TokenBackoff.MAX_ATTEMPTS) {
+            SpikeLog.append("push token gave up")
+            return
+        }
+        retryAttempt[key] = next
+        val wait = TokenBackoff.delayMs(next)
+        scope.launch {
+            delay(wait)
+            if (key == PushApps.DEFAULT) {
+                fetchDefault(context)
+            } else {
+                val config = ConfigStore.lines.value.mapNotNull { it.config.push }
+                    .firstOrNull { it.projectId == key } ?: return@launch
+                fetchSecondary(context, config)
+            }
         }
     }
 }
