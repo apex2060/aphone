@@ -10,15 +10,22 @@ and becomes a dialer that makes calls, rings for incoming calls, and keeps a cal
 * **Calling:** PJSIP 2.17 (`libpjsua2`), the same registration and call plan as 22 SIP Test 0.5.
   The Plivo Android SDK is not part of this app. Credentials are still the endpoint username
   and password from the provisioning document.
-* **Incoming calls:** a foreground service keeps the registration open, posts a full-screen
-  ringing notification with Answer and Decline, and logs missed calls.
+* **Incoming calls:** with Firebase configured, a high-priority data push wakes the phone,
+  which registers, tells the server it is ready, and rings. Without `google-services.json`,
+  a foreground service keeps the registration open. Either way the ring is a full-screen
+  notification with Answer and Decline, and missed calls are logged.
 * **History:** a local SQLite log of incoming, outgoing, missed and declined calls, with tap to call back.
 * **Remote control of the fleet:** the phone re-fetches its document every `refreshHours`, and
   an HTTP `410` from your server wipes it back to the scanner.
 * **Reset:** long-press the title bar and enter the admin PIN.
 
-Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning. No Google Play services or Firebase
-needed. minSdk 26 (Android 8), target 35. The application id stays `com.apex2060.softphone`.
+Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and optional
+Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The application id stays
+`com.apex2060.softphone`.
+
+Push uses the existing ed22 Firebase Android app. `app/google-services.json` is not in git.
+If that file is absent at build time, push is compiled out and the phone keeps the always-on
+registration. Drop the file in `app/` and rebuild to turn push on. Do not commit it.
 
 Release builds accept only `https://` provisioning URLs. Debug builds also accept `http://` so a
 phone on the same LAN can reach the sample server.
@@ -42,7 +49,7 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.0.0` and `versionCode` defaults to `1`. CI sets `versionName` from
+`versionName` defaults to `1.3.0` and `versionCode` defaults to `21`. CI sets `versionName` from
 the git tag (`v1.0.1` becomes `1.0.1`) and `versionCode` from the GitHub Actions run number, which
 increases on every run. Pass `-PversionName` and `-PversionCode` to override either value. The
 keystore is never committed.
@@ -101,8 +108,10 @@ debug-signed build. Uninstall that copy once. Later tags install over this one.
 
 1. Install the APK and open it. Allow the camera.
 2. Scan the setup QR code.
-3. Allow the microphone and notifications, and allow the app to ignore battery optimisation
-   (it asks once). Without that, Android may stop the connection and the phone won't ring.
+3. Allow the microphone and notifications. A build without push also asks once to ignore
+   battery optimisation, because otherwise Android may stop the always-on registration.
+   A push build does not ask for that exemption. Full-screen alerts are still requested so
+   a locked phone can show the answer screen.
 
 ## Layout
 
@@ -116,6 +125,16 @@ app/src/main/java/com/apex2060/softphone/
 server/     sample provisioning endpoint
 docs/       provisioning schema
 ```
+
+## License
+
+22 Phone is free software under the GNU General Public License, version 2 or, at your
+option, any later version. See [LICENSE](LICENSE). PJSIP is GPL-2.0-or-later. OpenSSL and
+the AndroidX / Kotlin / Compose / CameraX / ZXing libraries are Apache-2.0.
+
+Apache-2.0 software can be combined with a GPL-2.0-or-later program when the combined work
+is distributed under GPL version 3 (the "or later" option). It would not be compatible with
+GPL-2.0-only. The Open-source licenses screen in the app lists the same notices.
 
 ## Known limits
 

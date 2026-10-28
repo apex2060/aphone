@@ -89,7 +89,8 @@ class CallActivity : ComponentActivity() {
                 if (current != null && current.phase != CallPhase.ENDED) {
                     val names = themeLine?.config?.speedDials.orEmpty()
                         .associate { engine.normalize(it.number, themeLine?.id) to it.label }
-                    CallScreen(engine, current, names[current.number])
+                    val named = current.callerName?.takeIf { it.isNotBlank() } ?: names[current.number]
+                    CallScreen(engine, current, named)
                 }
             }
         }

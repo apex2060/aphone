@@ -23,6 +23,9 @@ import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.Provisioner
+import com.apex2060.softphone.push.PushClient
+import com.apex2060.softphone.push.PushGate
+import com.apex2060.softphone.push.PushRuntime
 import com.apex2060.softphone.config.RevokedException
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.Outcome
@@ -49,6 +52,7 @@ class PhoneService : Service() {
     private var vibrator: Vibrator? = null
     private var screenWake: PowerManager.WakeLock? = null
     private var stayAwake: PowerManager.WakeLock? = null
+    private var telecomAsked = false
 
     private val engine get() = (application as SoftphoneApp).engine
 
@@ -56,7 +60,8 @@ class PhoneService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        goForeground(Notifications.status(this, engine.registration.value, null), mic = false)
+        goForeground(Notifications.status(this, engine.registration.value, null), mic = false, call = nextWakeIsCall)
+        nextWakeIsCall = false
         if (!ConfigStore.anyEnabled()) {
             stopSelf()
             return
@@ -78,7 +83,9 @@ class PhoneService : Service() {
                 .distinctUntilChanged()
                 .collect { wanted ->
                     engine.syncEnabledLines()
-                    if (wanted.isEmpty()) stopSelf()
+                    if (wanted.isEmpty() || (!PushGate.needsIdleService() && !engine.isAwake() && engine.call.value == null)) {
+                        stopSelf()
+                    }
                 }
         }
         scope.launch {
@@ -123,7 +130,12 @@ class PhoneService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         val incoming = call?.takeIf { it.phase == CallPhase.RINGING_IN }
         if (incoming != null) {
-            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, incoming.number, incoming.lineLabel))
+            val who = incoming.callerName?.ifBlank { null } ?: incoming.number
+            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, who, incoming.lineLabel))
+            if (!telecomAsked) {
+                telecomAsked = true
+                OwnCalls.addIncoming(this, incoming.number)
+            }
             startRing(incoming.number)
         } else {
             stopRing()
@@ -141,7 +153,12 @@ class PhoneService : Service() {
             dismissCallNotifications(nm)
         }
         callNotificationPosted = callChrome
-        goForeground(Notifications.status(this, reg, call), mic = inCall)
+        if (call?.phase == CallPhase.ACTIVE) OwnCalls.active()
+        if (!callChrome) {
+            telecomAsked = false
+            OwnCalls.close()
+        }
+        goForeground(Notifications.status(this, reg, call), mic = inCall, call = callChrome)
     }
 
     private fun dismissCallNotifications(nm: NotificationManager) {
@@ -218,24 +235,25 @@ class PhoneService : Service() {
         screenWake = null
     }
 
-    private fun goForeground(notification: android.app.Notification, mic: Boolean) {
-        // specialUse covers the always-on SIP registration. phoneCall would require
-        // the dialer role or a Telecom ConnectionService, which would take over audio.
-        // microphone is added only while a call is capturing audio.
-        val base = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
+    private fun goForeground(notification: android.app.Notification, mic: Boolean, call: Boolean) {
+        // phoneCall covers a ringing or active call. specialUse is only the no-push
+        // always-on registration. microphone is added only while a call is capturing audio.
+        val phone = if (call && Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL else 0
+        val special = if (!call && Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         val withMic = if (mic && Build.VERSION.SDK_INT >= 30) {
-            base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            phone or special or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         } else {
-            base
+            phone or special
         }
         try {
             ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, withMic)
+            if (call) SpikeLog.append("fgs phoneCall")
         } catch (e: Exception) {
+            val fallback = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
             SpikeLog.append(
-                "foreground with mic refused: ${e.javaClass.simpleName}: ${e.message} " +
-                    "(call is not hung up)"
+                "push fgs denied ${e.javaClass.simpleName}: ${e.message} (call is not hung up)"
             )
-            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, base)
+            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, fallback)
         }
     }
 
@@ -262,15 +280,37 @@ class PhoneService : Service() {
         private const val REGISTER_REFRESH_MS = 90_000L
         const val ACTION_DECLINE = "com.apex2060.softphone.DECLINE"
         const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
+        const val ACTION_PUSH = "com.apex2060.softphone.PUSH"
+
+        @Volatile
+        var nextWakeIsCall = false
 
         fun start(context: Context) {
-            if (!ConfigStore.anyEnabled()) return
+            if (!ConfigStore.anyEnabled() || !PushGate.needsIdleService()) return
             ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
+        }
+
+        /** High-priority FCM wake. The foreground service starts before SIP registration. */
+        fun startForPush(context: Context) {
+            nextWakeIsCall = true
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_PUSH),
+            )
+        }
+
+        fun considerIdle(context: Context) {
+            val app = context.applicationContext as SoftphoneApp
+            val call = app.engine.call.value
+            val inCall = call != null && call.phase != CallPhase.ENDED
+            if (PushGate.needsIdleService() || app.engine.isAwake() || inCall) return
+            context.stopService(Intent(context, PhoneService::class.java))
         }
 
         fun turnOn(context: Context, lineId: String) {
             ConfigStore.setEnabled(lineId, true)
-            ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
+            start(context)
+            PushRuntime.token?.let { PushClient.publishToken(context.applicationContext, it) }
         }
 
         fun turnOff(context: Context, lineId: String) {
@@ -278,6 +318,8 @@ class PhoneService : Service() {
             (context.applicationContext as SoftphoneApp).engine.turnOff(lineId)
             if (!ConfigStore.anyEnabled()) {
                 context.stopService(Intent(context, PhoneService::class.java))
+            } else {
+                considerIdle(context)
             }
         }
 
@@ -287,6 +329,8 @@ class PhoneService : Service() {
             ConfigStore.remove(lineId)
             if (!ConfigStore.anyEnabled()) {
                 context.stopService(Intent(context, PhoneService::class.java))
+            } else {
+                considerIdle(context)
             }
             if (ConfigStore.lines.value.isEmpty()) {
                 context.getSystemService(NotificationManager::class.java).cancel(Notifications.ID_SERVICE)
@@ -303,6 +347,8 @@ class PhoneService : Service() {
             ConfigStore.remove(lineId)
             if (!ConfigStore.anyEnabled()) {
                 context.stopService(Intent(context, PhoneService::class.java))
+            } else {
+                considerIdle(context)
             }
             if (ConfigStore.lines.value.isEmpty()) {
                 context.getSystemService(NotificationManager::class.java).cancelAll()

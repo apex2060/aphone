@@ -3,6 +3,9 @@ package com.apex2060.softphone.config
 import android.os.Build
 import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.SpikeLog
+import com.apex2060.softphone.push.ProvisionActions
+import com.apex2060.softphone.push.putPushFields
+import com.apex2060.softphone.push.PushRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -51,6 +54,7 @@ object Provisioner {
                         .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
                         .put("android", Build.VERSION.RELEASE)
                         .put("app", BuildConfig.VERSION_NAME))
+                    .putPushFields(PushRuntime.token)
                     .toString()
             } else {
                 null
@@ -83,6 +87,28 @@ object Provisioner {
             SpikeLog.noteSecret(pass)
             SpikeLog.append("provision response HTTP $code\n$text")
             text to ProvisionConfig.parse(text)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** POST the same host with `action` replaced. 410 throws [RevokedException]. */
+    fun postAction(ticket: ProvisionTicket, action: String, body: JSONObject): Int {
+        SpikeLog.noteSecret(ticket.key)
+        val url = ProvisionActions.withAction(ticket.url, action)
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 15_000
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("Content-Type", "application/json")
+            if (ticket.key != null) conn.setRequestProperty("X-Provision-Key", ticket.key)
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = conn.responseCode
+            if (code == 410) throw RevokedException()
+            return code
         } finally {
             conn.disconnect()
         }

@@ -75,6 +75,11 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
     val autoRecording by ConfigStore.autoRecording.collectAsState()
     var confirmRemove by remember { mutableStateOf(false) }
     var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
+    var showLicenses by remember { mutableStateOf(false) }
+    if (showLicenses) {
+        LicensesScreen(onBack = { showLicenses = false })
+        return
+    }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize()) {
             PhoneAppBar(engine, onTitle = onHome, onNetwork = null)
@@ -185,6 +190,7 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
                 TextButton(onClick = { confirmRemove = true }) {
                     Text("Remove this phone", color = LocalCallColors.current.decline)
                 }
+                AboutLinks(onLicenses = { showLicenses = true })
             }
             HorizontalDivider()
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -232,6 +238,11 @@ fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit)
     val pins = stored.mapNotNull { it.config.adminPin }
     val autoRecording by ConfigStore.autoRecording.collectAsState()
     var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
+    var showLicenses by remember { mutableStateOf(false) }
+    if (showLicenses) {
+        LicensesScreen(onBack = { showLicenses = false })
+        return
+    }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize()) {
             PhoneAppBar(engine, onTitle = onHome, onNetwork = null)
@@ -268,6 +279,7 @@ fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit)
                     StatusLine("Full-screen alerts", if (Notifications.canUseFullScreenIntent(context)) "allowed" else "denied")
                     StatusLine("Battery", if (Notifications.batteryUnrestricted(context)) "unrestricted" else "optimized")
                     DeviceAccessLinks(context)
+                    AboutLinks(onLicenses = { showLicenses = true })
                 }
                 HorizontalDivider()
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

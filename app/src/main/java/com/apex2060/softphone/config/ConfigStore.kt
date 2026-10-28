@@ -74,6 +74,8 @@ object ConfigStore {
     private const val KEY_MANUAL_PASS = "manual_pass"
     private const val KEY_PHONE = "phone_enabled"
     private const val KEY_AUTO_RECORD = "auto_recording"
+    private const val KEY_DEVICE = "device_id"
+    private const val KEY_PUSH_ACK = "push_acked"
     private const val KEY_LINES = "lines_json"
     private const val KEY_LAST_DIAL = "last_dial_line"
 
@@ -170,6 +172,7 @@ object ConfigStore {
                 _lastDial.value = null
                 prefs.edit().remove(KEY_LAST_DIAL).apply()
             }
+            setPushAcked(id, false)
             persistLocked()
             SpikeLog.append("line removed")
             return true
@@ -202,11 +205,33 @@ object ConfigStore {
 
     fun clearManual(id: String) = update(id) { it.copy(manualUser = null, manualPass = null) }
 
-    /** App-wide. Stored in the same prefs file, so an upgrade keeps the current value. */
+    /**
+     * App-wide. Missing key means off, so a fresh install does not record.
+     * An upgrade that already stored true stays on.
+     */
     fun setAutoRecording(on: Boolean) {
         prefs.edit().putBoolean(KEY_AUTO_RECORD, on).apply()
         _autoRecording.value = on
     }
+
+    /** Random per install. Not ANDROID_ID, so a second app signed with the same key stays distinct. */
+    fun deviceId(): String {
+        val existing = prefs.getString(KEY_DEVICE, null)
+        if (!existing.isNullOrBlank()) return existing
+        val created = UUID.randomUUID().toString()
+        prefs.edit().putString(KEY_DEVICE, created).apply()
+        return created
+    }
+
+    fun isPushAcked(lineId: String): Boolean = pushAcked().contains(lineId)
+
+    fun setPushAcked(lineId: String, on: Boolean) {
+        val next = pushAcked().toMutableSet()
+        if (on) next.add(lineId) else next.remove(lineId)
+        prefs.edit().putStringSet(KEY_PUSH_ACK, HashSet(next)).apply()
+    }
+
+    private fun pushAcked(): Set<String> = prefs.getStringSet(KEY_PUSH_ACK, emptySet()).orEmpty()
 
     var askedBattery: Boolean
         get() = prefs.getBoolean(KEY_ASKED_BATTERY, false)

@@ -20,6 +20,9 @@ import com.twentytwo.phone.sipspike.AddrOverride
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.Direction
 import com.apex2060.softphone.history.Outcome
+import com.apex2060.softphone.push.PushClient
+import com.apex2060.softphone.push.PushGate
+import com.apex2060.softphone.push.SipPushMatch
 import com.apex2060.softphone.record.CallRecording
 import com.apex2060.softphone.record.Recordings
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,6 +76,7 @@ data class CallUi(
     val outcome: Outcome? = null,
     val lineId: String = "",
     val lineLabel: String = "",
+    val callerName: String? = null,
 )
 
 data class LineUi(
@@ -134,6 +138,22 @@ class SipEngine(private val app: Application) {
     private var lastRtpOut = -1L
     private var pendingNet = "change"
     private var seenNetKey = ""
+    @Volatile private var pushSession: PushWake? = null
+    private var wakeGen = 0
+
+    private class PushWake(
+        val callUuid: String,
+        val from: String,
+        val fromName: String,
+        val lineIds: Set<String>,
+        val receivedAt: Long,
+        val generation: Int,
+        val readySent: MutableSet<String> = HashSet(),
+        var inviteArrived: Boolean = false,
+        var answered: Boolean = false,
+    )
+
+    fun isAwake(): Boolean = pushSession != null || regs.values.any { it.hold }
 
     private class RegLine(val id: String) {
         @Volatile var wantRegister = false
@@ -155,6 +175,8 @@ class SipEngine(private val app: Application) {
         var retry: Runnable? = null
         var account: SpikeAccount? = null
         @Volatile var pendingReregister = false
+        /** Register for a push or an outbound call, then drop it when push is active. */
+        @Volatile var hold = false
     }
 
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
@@ -269,8 +291,6 @@ class SipEngine(private val app: Application) {
     fun dial(raw: String, lineId: String): Boolean {
         val stored = ConfigStore.line(lineId) ?: return false
         if (!stored.enabled) return false
-        val reg = regs[lineId]
-        if (reg == null || !reg.registeredOk) return false
         if (_call.value != null && _call.value?.phase != CallPhase.ENDED) return false
         val number = normalize(raw, lineId)
         if (number.isEmpty()) return false
@@ -282,6 +302,27 @@ class SipEngine(private val app: Application) {
             lineId = lineId,
             lineLabel = stored.config.title,
         )
+        val reg = regs[lineId]
+        if (reg == null || !reg.registeredOk) {
+            if (!PushGate.parked(lineId)) return false
+            val creds = stored.resolvedCreds() ?: return false
+            _call.value = ui
+            signaled = false
+            uiCleared = false
+            loggedResponses.clear()
+            sawEarly = false
+            triedClient = false
+            callRecording.reset()
+            pjsip.post {
+                val held = regs.getOrPut(lineId) { RegLine(lineId) }
+                held.hold = true
+                wakeGen++
+                if (!held.wantRegister || (!held.attempting && !held.registeredOk)) {
+                    startLine(held, creds.first, creds.second)
+                }
+            }
+            return true
+        }
         _call.value = ui
         signaled = false
         uiCleared = false
@@ -386,6 +427,11 @@ class SipEngine(private val app: Application) {
         if (wanted.isNotEmpty()) ClientProbe.startOnce()
         for ((id, creds) in wanted) {
             val reg = regs.getOrPut(id) { RegLine(id) }
+            val busy = callOn(id) || (_call.value?.lineId == id && _call.value?.phase == CallPhase.DIALING)
+            if (PushGate.parked(id) && !reg.hold && !busy) {
+                if (reg.wantRegister || reg.account != null) stopLine(id)
+                continue
+            }
             if (reg.wantRegister && reg.username == creds.first && reg.password == creds.second &&
                 (reg.registeredOk || reg.attempting)
             ) {
@@ -548,6 +594,17 @@ class SipEngine(private val app: Application) {
             val override = ConfigStore.line(reg.id)?.transportMode() != null
             val why = if (override) "Override transport failed" else "All transports failed"
             setLineReg(reg.id, Registration.FAILED, why)
+            val waiting = _call.value
+            if (reg.hold && waiting != null && waiting.lineId == reg.id && waiting.phase == CallPhase.DIALING && callObj == null) {
+                SpikeLog.append("$why")
+                reg.hold = false
+                main.post {
+                    _call.value = waiting.copy(phase = CallPhase.ENDED, endedLabel = "Call failed", outcome = Outcome.FAILED)
+                }
+                main.postDelayed({ if (_call.value?.startedAt == waiting.startedAt) _call.value = null }, 600)
+                if (PushGate.parked(reg.id)) stopLine(reg.id)
+                return
+            }
             SpikeLog.append("$why; retry in 30s")
             scheduleRetry(reg, gen)
             return
@@ -709,6 +766,19 @@ class SipEngine(private val app: Application) {
         SpikeLog.append("transport won ${mode.label} on ${reg.planSig}")
         setLineReg(reg.id, Registration.ONLINE, "Registered")
         publishTransport(reg.id)
+        val session = pushSession
+        if (session != null && reg.id in session.lineIds && session.readySent.add(reg.id)) {
+            val waited = System.currentTimeMillis() - session.receivedAt
+            SpikeLog.append("push register latency ms=$waited code=200")
+            main.post { PushClient.notifyReady(app, reg.id, session.callUuid) }
+        }
+        val waiting = _call.value
+        if (reg.hold && waiting != null && waiting.lineId == reg.id &&
+            waiting.phase == CallPhase.DIALING && callObj == null
+        ) {
+            val route = ConfigStore.line(reg.id)?.route() ?: OutboundRoute.DIRECT
+            placeCall(waiting, viaClient = route == OutboundRoute.VIA_CLIENT)
+        }
     }
 
     private fun failTransport(reg: RegLine, gen: Int, token: Int, why: String) {
@@ -1013,7 +1083,100 @@ class SipEngine(private val app: Application) {
         }
     }
 
-    private fun onIncoming(acc: SpikeAccount, callId: Int) {
+    fun wakeIncoming(callUuid: String, from: String, fromName: String, lineIds: Set<String>) {
+        if (pushSession?.callUuid.equals(callUuid, ignoreCase = true)) {
+            SpikeLog.append("push ignore duplicate")
+            return
+        }
+        val generation = ++wakeGen
+        val session = PushWake(
+            callUuid = callUuid,
+            from = from,
+            fromName = fromName,
+            lineIds = lineIds,
+            receivedAt = System.currentTimeMillis(),
+            generation = generation,
+        )
+        pushSession = session
+        val line = ConfigStore.line(lineIds.first())
+        val shown = from.ifBlank { "Incoming" }
+        _call.value = CallUi(
+            direction = Direction.INCOMING,
+            number = shown,
+            phase = CallPhase.RINGING_IN,
+            lineId = line?.id ?: lineIds.first(),
+            lineLabel = line?.config?.title.orEmpty(),
+            callerName = fromName.ifBlank { null },
+        )
+        pjsip.post {
+            if (pushSession?.generation != generation) return@post
+            for (id in lineIds) {
+                val stored = ConfigStore.line(id) ?: continue
+                if (!stored.enabled) continue
+                val creds = stored.resolvedCreds() ?: continue
+                val reg = regs.getOrPut(id) { RegLine(id) }
+                reg.hold = true
+                if (reg.registeredOk) {
+                    if (session.readySent.add(id)) {
+                        SpikeLog.append("push register latency ms=0 code=200")
+                        main.post { PushClient.notifyReady(app, id, callUuid) }
+                    }
+                } else if (!reg.attempting) {
+                    startLine(reg, creds.first, creds.second)
+                }
+            }
+        }
+        main.postDelayed({
+            if (pushSession?.generation != generation) return@postDelayed
+            if (pushSession?.inviteArrived == true) return@postDelayed
+            SpikeLog.append("push timeout no invite")
+            val current = _call.value
+            if (current != null && current.phase == CallPhase.RINGING_IN && current.answeredAt == null) {
+                _call.value = current.copy(phase = CallPhase.ENDED, endedLabel = "Missed call", outcome = Outcome.MISSED)
+                main.postDelayed({ if (_call.value?.startedAt == current.startedAt) _call.value = null }, 400)
+            }
+            pjsip.post { releaseWake(current?.lineId.orEmpty(), generation) }
+        }, 20_000)
+    }
+
+    fun cancelIncoming(callUuid: String) {
+        val session = pushSession ?: return
+        if (!session.callUuid.equals(callUuid, ignoreCase = true)) return
+        if (session.answered || _call.value?.answeredAt != null) return
+        SpikeLog.append("push cancel applied")
+        val current = _call.value
+        if (session.inviteArrived && current?.phase == CallPhase.RINGING_IN) {
+            decline()
+            return
+        }
+        if (current != null && current.phase == CallPhase.RINGING_IN) {
+            _call.value = current.copy(phase = CallPhase.ENDED, endedLabel = "Missed call", outcome = Outcome.MISSED)
+            main.postDelayed({ if (_call.value?.startedAt == current.startedAt) _call.value = null }, 400)
+        }
+        val generation = session.generation
+        pushSession = null
+        pjsip.post { releaseWake(current?.lineId.orEmpty(), generation) }
+    }
+
+    private fun releaseWake(lineId: String, generation: Int) {
+        if (generation != wakeGen && pushSession?.generation != generation) return
+        if (pushSession?.generation == generation) pushSession = null
+        val ids = if (lineId.isBlank()) regs.keys.toList() else listOf(lineId)
+        for (id in ids) {
+            val reg = regs[id] ?: continue
+            if (!reg.hold) continue
+            if (_call.value?.phase?.let { it != CallPhase.ENDED } == true &&
+                _call.value?.lineId == id && callObj != null
+            ) {
+                continue
+            }
+            reg.hold = false
+            if (PushGate.parked(id)) stopLine(id)
+        }
+        main.post { com.apex2060.softphone.phone.PhoneService.considerIdle(app) }
+    }
+
+    private fun onIncoming(acc: SpikeAccount, callId: Int, sipMessage: String?) {
         val reg = regs[acc.lineId]
         if (reg == null || !reg.wantRegister) {
             SpikeLog.append("incoming ignored, phone is off")
@@ -1028,7 +1191,15 @@ class SipEngine(private val app: Application) {
             }
             return
         }
-        if (_call.value != null && _call.value?.phase != CallPhase.ENDED) {
+        val headerUuid = SipPushMatch.uuidFromInvite(sipMessage)
+        val session = pushSession
+        val match = if (session == null) {
+            SipPushMatch.Match.NONE
+        } else {
+            SipPushMatch.matches(session.callUuid, session.from, headerUuid, SipPushMatch.fromUser(sipMessage))
+        }
+        val armed = session != null && !session.inviteArrived && acc.lineId in session.lineIds
+        if (!armed && _call.value != null && _call.value?.phase != CallPhase.ENDED) {
             SpikeLog.append("incoming busy, 486")
             try {
                 val busy = SpikeCall(acc, callId, this, incoming = true)
@@ -1053,13 +1224,19 @@ class SipEngine(private val app: Application) {
             callRecording.reset()
             val from = displayNumber(runCatching { next.info.remoteUri }.getOrDefault(""))
             val label = ConfigStore.line(acc.lineId)?.config?.title.orEmpty()
+            if (armed) {
+                session.inviteArrived = true
+                val waited = System.currentTimeMillis() - session.receivedAt
+                SpikeLog.append("invite arrive match=${match.name.lowercase()} latencyMs=$waited")
+            }
             SpikeLog.append("INVITE incoming from $from")
             val ui = CallUi(
                 direction = Direction.INCOMING,
-                number = from,
+                number = from.ifBlank { session?.from.orEmpty() },
                 phase = CallPhase.RINGING_IN,
                 lineId = acc.lineId,
                 lineLabel = label,
+                callerName = session?.fromName?.ifBlank { null },
             )
             main.post { _call.value = ui }
         } catch (e: Exception) {
@@ -1110,6 +1287,7 @@ class SipEngine(private val app: Application) {
                 }
                 engageAudio(speaker = ui?.speaker == true)
                 startRtp()
+                pushSession?.let { it.answered = true }
                 callRecording.markConfirmed()
                 callRecording.startIfReady(audioMedia, captureMedia())
             }
@@ -1375,6 +1553,9 @@ class SipEngine(private val app: Application) {
             if (_call.value?.startedAt == ui.startedAt) _call.value = null
         }, 400)
         scheduleDelete(current)
+        val endedLine = ui.lineId
+        val endedGen = wakeGen
+        pjsip.post { releaseWake(endedLine, endedGen) }
         val deferred = regs.values.filter { it.pendingReregister && it.wantRegister }
         if (deferred.isNotEmpty()) {
             pjsip.post {
@@ -1643,7 +1824,8 @@ class SipEngine(private val app: Application) {
         }
 
         override fun onIncomingCall(prm: OnIncomingCallParam) {
-            engine.onIncoming(this, prm.callId)
+            val message = runCatching { prm.rdata?.wholeMsg }.getOrNull()
+            engine.onIncoming(this, prm.callId, message)
         }
     }
 

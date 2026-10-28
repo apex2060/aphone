@@ -4,7 +4,10 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services") apply false
 }
+
+val pushEnabled = file("google-services.json").exists()
 
 // CI passes these. A local build keeps the defaults.
 //   ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=42
@@ -12,8 +15,8 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.2.2"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 20
+    ?: "1.3.0"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 21
 
 android {
     namespace = "com.apex2060.softphone"
@@ -27,6 +30,8 @@ android {
         versionName = releaseVersionName
         // PJSIP is built for arm64. v1.0.5 also shipped armeabi-v7a via the Plivo SDK.
         ndk { abiFilters += listOf("arm64-v8a") }
+        // True only for a build that had app/google-services.json. Push stays off otherwise.
+        buildConfigField("boolean", "PUSH_ENABLED", pushEnabled.toString())
     }
 
     val keystorePath = System.getenv("ANDROID_KEYSTORE_FILE")
@@ -147,4 +152,11 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
 
     testImplementation("junit:junit:4.13.2")
+
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
+if (pushEnabled) {
+    apply(plugin = "com.google.gms.google-services")
 }
