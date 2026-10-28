@@ -2,6 +2,7 @@ package com.apex2060.softphone.push
 
 import android.content.Context
 import com.apex2060.softphone.BuildConfig
+import com.apex2060.softphone.LineStandby
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
@@ -46,7 +47,10 @@ object PushRuntime {
         if (next.isBlank()) return
         tokens[PushApps.DEFAULT] = next
         SpikeLog.noteSecret(next)
-        val ids = ConfigStore.lines.value.filter { it.config.push == null }.map { it.id }.toSet()
+            val ids = LineStandby.lineIdsForProject(
+                ConfigStore.lines.value.map { it.id to it.config.push?.projectId },
+                null,
+            )
         if (ids.isNotEmpty()) PushClient.publish(context, next, ids)
     }
 
@@ -139,10 +143,10 @@ object PushRuntime {
             val next = task.result
             tokens[config.projectId] = next
             SpikeLog.noteSecret(next)
-            val ids = ConfigStore.lines.value
-                .filter { it.config.push?.projectId == config.projectId }
-                .map { it.id }
-                .toSet()
+            val ids = LineStandby.lineIdsForProject(
+                ConfigStore.lines.value.map { it.id to it.config.push?.projectId },
+                config.projectId,
+            )
             if (ids.isNotEmpty()) PushClient.publish(context, next, ids)
         }
     }

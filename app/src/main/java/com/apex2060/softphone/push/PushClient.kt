@@ -2,6 +2,7 @@ package com.apex2060.softphone.push
 
 import android.content.Context
 import com.apex2060.softphone.BuildConfig
+import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.ProvisionTicket
@@ -62,6 +63,7 @@ object PushClient {
                     is TokenAttempt.Failed -> SpikeLog.append("token update failed: ${result.reason}")
                 }
             }
+            (context.applicationContext as SoftphoneApp).engine.syncEnabledLines()
             PhoneService.considerIdle(context)
         }
     }

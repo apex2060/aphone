@@ -60,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.apex2060.softphone.CallPhase
+import com.apex2060.softphone.LineStandby
 import com.apex2060.softphone.LineUi
 import com.apex2060.softphone.R
 import com.apex2060.softphone.Registration
@@ -75,6 +76,7 @@ import com.apex2060.softphone.history.CallRecord
 import com.apex2060.softphone.history.Direction
 import com.apex2060.softphone.history.Outcome
 import com.apex2060.softphone.phone.PhoneService
+import com.apex2060.softphone.push.PushGate
 
 private enum class Tab(val label: String, @DrawableRes val icon: Int) {
     KEYPAD("Keypad", R.drawable.ic_dialpad),
@@ -290,12 +292,12 @@ private fun PhoneCard(
     val theme = line.config.theme
     val primary = Color(theme.primary)
     val onPrimary = Color(theme.onPrimary)
-    val label = statusLabel(line.enabled, status?.registration)
+    val standby = PushGate.parked(line.id)
+    val label = shownStatus(line.enabled, status?.registration, standby)
     val dot = when {
         !line.enabled -> onPrimary.copy(alpha = 0.45f)
-        status?.registration == Registration.ONLINE -> Color(theme.accept)
-        status?.registration == Registration.FAILED || status?.registration == Registration.OFFLINE ->
-            Color(theme.decline)
+        status?.registration == Registration.ONLINE || standby -> Color(theme.accept)
+        status?.registration == Registration.FAILED -> Color(theme.decline)
         else -> onPrimary.copy(alpha = 0.7f)
     }
     val subtitle = phoneSubtitle(line)
@@ -366,12 +368,9 @@ internal fun phoneTitle(line: StoredLine): String {
 /** Provisioned subtitle, usually the endpoint name and phone number. */
 internal fun phoneSubtitle(line: StoredLine): String = line.config.subtitle?.trim().orEmpty()
 
-private fun statusLabel(enabled: Boolean, registration: Registration?): String = when {
-    !enabled -> "Off"
-    registration == Registration.ONLINE -> "Ready"
-    registration == Registration.CONNECTING -> "Connecting"
-    registration == Registration.FAILED -> "Failed"
-    else -> "Offline"
+private fun shownStatus(enabled: Boolean, registration: Registration?, pushStandby: Boolean): String {
+    val label = LineStandby.label(enabled, registration, pushStandby)
+    return if (LineStandby.showsPush(enabled, pushStandby) && label == "Ready") "$label · Push" else label
 }
 
 @Composable
@@ -395,12 +394,12 @@ private fun LineDialer(
                 if (tabs.size > 1) Modifier else Modifier.navigationBarsPadding(),
             ),
         ) {
-            LineHeader(line, status) { on ->
+            LineHeader(line, status, PushGate.parked(line.id)) { on ->
                 if (on) PhoneService.turnOn(context, line.id) else PhoneService.turnOff(context, line.id)
             }
             Box(Modifier.weight(1f)) {
                 when (tab) {
-                    Tab.KEYPAD -> Keypad(status) { number -> onDial(number, line.id) }
+                    Tab.KEYPAD -> Keypad(status, PushGate.parked(line.id)) { number -> onDial(number, line.id) }
                     Tab.SPEED -> SpeedDials(line) { onDial(it, line.id) }
                     Tab.RECENTS -> LineRecents(engine, line, onDial)
                 }
@@ -422,10 +421,10 @@ private fun LineDialer(
 }
 
 @Composable
-private fun LineHeader(line: StoredLine, status: LineUi?, onToggle: (Boolean) -> Unit) {
+private fun LineHeader(line: StoredLine, status: LineUi?, pushStandby: Boolean, onToggle: (Boolean) -> Unit) {
     val onPrimary = MaterialTheme.colorScheme.onPrimary
     val subtitle = phoneSubtitle(line)
-    val label = statusLabel(line.enabled, status?.registration)
+    val label = shownStatus(line.enabled, status?.registration, pushStandby)
     Column(
         Modifier
             .fillMaxWidth()
@@ -474,10 +473,11 @@ private fun LineHeader(line: StoredLine, status: LineUi?, onToggle: (Boolean) ->
 @Composable
 private fun Keypad(
     status: LineUi?,
+    pushStandby: Boolean,
     onDial: (String) -> Unit,
 ) {
     var number by remember { mutableStateOf("") }
-    val ready = status?.registration == Registration.ONLINE
+    val ready = LineStandby.canDial(true, status?.registration, pushStandby)
     Column(
         Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

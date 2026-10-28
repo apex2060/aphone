@@ -139,6 +139,7 @@ class SipEngine(private val app: Application) {
     private var pendingNet = "change"
     private var seenNetKey = ""
     @Volatile private var pushSession: PushWake? = null
+    @Volatile private var wakingIds: Set<String> = emptySet()
     private var wakeGen = 0
 
     private class PushWake(
@@ -322,6 +323,7 @@ class SipEngine(private val app: Application) {
                 }
             }
             com.apex2060.softphone.phone.PhoneService.startForOutgoing(app)
+            armDialRegistrationTimeout(lineId, ui.startedAt)
             return true
         }
         _call.value = ui
@@ -430,7 +432,11 @@ class SipEngine(private val app: Application) {
         for ((id, creds) in wanted) {
             val reg = regs.getOrPut(id) { RegLine(id) }
             val busy = callOn(id) || (_call.value?.lineId == id && _call.value?.phase == CallPhase.DIALING)
-            if (PushGate.parked(id) && !reg.hold && !busy) {
+            val drop = LineStandby.linesToDrop(
+                listOf(HeldLine(id, PushGate.parked(id), reg.hold, busy)),
+                wakingIds,
+            )
+            if (id in drop) {
                 if (reg.wantRegister || reg.account != null) stopLine(id)
                 continue
             }
@@ -495,9 +501,33 @@ class SipEngine(private val app: Application) {
             reg.currentMode = null
             clearPinIfUnused()
             maybeDestroyEndpoint()
-            setLineReg(lineId, Registration.OFFLINE, "Off")
+            val stillOn = ConfigStore.line(lineId)?.enabled == true && PushGate.parked(lineId)
+            setLineReg(lineId, Registration.OFFLINE, if (stillOn) "Standby" else "Off")
         }
         if (wait) pjsip.postDelayed(finish, 2_000) else finish.run()
+    }
+
+    private fun armDialRegistrationTimeout(lineId: String, startedAt: Long) {
+        main.postDelayed({
+            val cur = _call.value
+            val registered = regs[lineId]?.registeredOk == true
+            if (cur != null && cur.startedAt == startedAt && cur.lineId == lineId &&
+                cur.phase == CallPhase.DIALING && !registered
+            ) {
+                SpikeLog.append("dial register timeout line=$lineId")
+                _call.value = cur.copy(
+                    phase = CallPhase.ENDED,
+                    endedLabel = "Couldn't register that phone",
+                    outcome = Outcome.FAILED,
+                )
+                main.postDelayed({ if (_call.value?.startedAt == startedAt) _call.value = null }, 600)
+                pjsip.post {
+                    val reg = regs[lineId]
+                    reg?.hold = false
+                    if (PushGate.parked(lineId)) stopLine(lineId)
+                }
+            }
+        }, 45_000)
     }
 
     private fun placeCall(ui: CallUi, viaClient: Boolean) {
@@ -601,7 +631,11 @@ class SipEngine(private val app: Application) {
                 SpikeLog.append("$why")
                 reg.hold = false
                 main.post {
-                    _call.value = waiting.copy(phase = CallPhase.ENDED, endedLabel = "Call failed", outcome = Outcome.FAILED)
+                    _call.value = waiting.copy(
+                        phase = CallPhase.ENDED,
+                        endedLabel = "Couldn't register that phone",
+                        outcome = Outcome.FAILED,
+                    )
                 }
                 main.postDelayed({ if (_call.value?.startedAt == waiting.startedAt) _call.value = null }, 600)
                 if (PushGate.parked(reg.id)) stopLine(reg.id)
@@ -1091,6 +1125,7 @@ class SipEngine(private val app: Application) {
             return
         }
         val generation = ++wakeGen
+        wakingIds = lineIds
         val session = PushWake(
             callUuid = callUuid,
             from = from,
@@ -1162,7 +1197,10 @@ class SipEngine(private val app: Application) {
 
     private fun releaseWake(lineId: String, generation: Int) {
         if (generation != wakeGen && pushSession?.generation != generation) return
-        if (pushSession?.generation == generation) pushSession = null
+        if (pushSession?.generation == generation) {
+            pushSession = null
+            wakingIds = emptySet()
+        }
         val ids = if (lineId.isBlank()) regs.keys.toList() else listOf(lineId)
         for (id in ids) {
             val reg = regs[id] ?: continue
