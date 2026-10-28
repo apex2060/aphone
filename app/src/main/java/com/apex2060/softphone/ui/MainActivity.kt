@@ -24,8 +24,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
-import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.phone.Notifications
+import com.apex2060.softphone.push.PushGate
 import com.apex2060.softphone.phone.PhoneService
 import com.apex2060.softphone.record.Recordings
 
@@ -49,7 +49,7 @@ class MainActivity : ComponentActivity() {
                 val permissions = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) {
-                    if (BuildConfig.PUSH_ENABLED) askFullScreenIntent() else askBatteryExemption()
+                    if (PushGate.suppressBatteryPrompt()) askFullScreenIntent() else askBatteryExemption()
                 }
                 LaunchedEffect(stored.joinToString { it.id }) {
                     if (ConfigStore.anyEnabled()) PhoneService.start(this@MainActivity)
@@ -87,7 +87,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (!ConfigStore.anyEnabled()) return
         (application as SoftphoneApp).engine.refreshRegistration("resume")
-        if (ConfigStore.askedBattery || BuildConfig.PUSH_ENABLED) askFullScreenIntent()
+        if (ConfigStore.askedBattery || PushGate.suppressBatteryPrompt()) askFullScreenIntent()
     }
 
     private fun openCall() = startActivity(Intent(this, CallActivity::class.java))

@@ -91,9 +91,67 @@ Respond `200` with `application/json`. Only `sip.username` and `sip.password` ar
 | `historyLimit` | int | `200` | Calls kept on the device (10 to 5000). |
 | `adminPin` | string | none | PIN needed to reset the phone. With no PIN, reset only asks for confirmation. |
 | `refreshHours` | int | `24` | How often the phone re-fetches this document with the same ticket, so you can rotate credentials or colors remotely. `0` turns refresh off. |
+| `push` | object | none | Optional Firebase Android client for this server. See below. |
 
 Colors are `#RRGGBB` or `#AARRGGBB`. Unknown fields are ignored, and a bad color falls back to
 its default.
+
+### Push
+
+Lines can be provisioned from different servers, and each server can send pushes from its own
+Firebase project. The values are the public Android client config, not a server secret. Use
+placeholders in examples. Do not put a real key in this document.
+
+```json
+"push": {
+  "projectId": "example-project",
+  "applicationId": "1:000000000000:android:0000000000000000000000",
+  "apiKey": "AIzaSyEXAMPLEEXAMPLEEXAMPLEEXAMPLE",
+  "gcmSenderId": "000000000000"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `projectId` | Firebase project id. The phone keeps one named Firebase app per id and reuses it for every line that names the same project. |
+| `applicationId` | `mobilesdk_app_id` (`1:<sender>:android:<hash>`). |
+| `apiKey` | Android API key for that Firebase project. |
+| `gcmSenderId` | Sender id, the numeric project number. |
+
+If `push` is missing or any field is blank, the phone does not create a secondary app for that
+line. It then uses the default Firebase app from `google-services.json` when this build has one
+(the Ed 22 project). If neither exists, push is off for that line and the phone keeps its
+registration open instead.
+
+The phone asks Firebase for that app's token and sends it only to this line's provision origin:
+
+* on `phone.provision`, once a token for that project is already known (the first scan often
+  omits it, because the project is inside this response)
+* on `POST {same url with action=phone.token}` with
+  `{"key","fcmToken","platform":"android","appVersion","deviceId"}`
+
+`deviceId` is a random UUID stored on the install. HTTP 410 still revokes that line.
+
+Data messages are delivered to one messaging service for every sender. Include `endpoint`
+(the SIP username) and `origin` (the provision host, such as `https://us.ed22.org`) so the phone
+can pick the line. `callUuid` still identifies the call. If both `endpoint` and `origin` are
+absent, any switched-on line may be woken, narrowed by `to` when that matches a number.
+
+```json
+{
+  "type": "incoming_call",
+  "callUuid": "example-call",
+  "from": "15551234567",
+  "fromName": "Ada",
+  "to": "15557654321",
+  "endpoint": "frontdesk123456789",
+  "origin": "https://phones.example.com",
+  "ts": "1729530000000"
+}
+```
+
+`cancel` uses the same `callUuid`, `endpoint`, and `origin`. The phone matches an INVITE header
+named `X-Call-UUID` or any `X-PH-` header whose name contains `Call-UUID`, case-insensitive.
 
 ### Status codes
 

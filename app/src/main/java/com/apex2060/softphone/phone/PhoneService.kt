@@ -23,7 +23,6 @@ import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.Provisioner
-import com.apex2060.softphone.push.PushClient
 import com.apex2060.softphone.push.PushGate
 import com.apex2060.softphone.push.PushRuntime
 import com.apex2060.softphone.config.RevokedException
@@ -266,6 +265,7 @@ class PhoneService : Service() {
             try {
                 val (json, next) = Provisioner.fetch(ticket)
                 ConfigStore.updateDocument(line.id, ticket, json, next)
+                PushRuntime.sync(this)
                 SpikeLog.append("provision refresh saved title=${next.title} refreshHours=${next.refreshHours}")
             } catch (e: RevokedException) {
                 SpikeLog.append("provision revoked user=${line.config.sipUsername}")
@@ -310,7 +310,7 @@ class PhoneService : Service() {
         fun turnOn(context: Context, lineId: String) {
             ConfigStore.setEnabled(lineId, true)
             start(context)
-            PushRuntime.token?.let { PushClient.publishToken(context.applicationContext, it) }
+            PushRuntime.sync(context.applicationContext)
         }
 
         fun turnOff(context: Context, lineId: String) {

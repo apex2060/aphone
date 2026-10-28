@@ -9,7 +9,7 @@ object LogSanitizer {
     private val provisionHeader = Regex("(?i)(X-Provision-Key|X-Api-Key)\\s*:[^\\r\\n]*")
     private val querySecret = Regex("(?i)([?&](?:key|token|secret|password)=)[^&\\s]*")
     private val jsonSecret = Regex(
-        """(?i)"(password|pass|key|token|secret|authorization|access_token|refresh_token|fcm|fcmToken|provision_key|provisionKey)"\s*:\s*"(?:\\.|[^"\\])*""""
+        """(?i)"(password|pass|key|apiKey|token|secret|authorization|access_token|refresh_token|fcm|fcmToken|provision_key|provisionKey)"\s*:\s*"(?:\\.|[^"\\])*""""
     )
 
     fun redact(message: String, secrets: Collection<String?> = emptyList()): String {

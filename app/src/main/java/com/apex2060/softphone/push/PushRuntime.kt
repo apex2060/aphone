@@ -4,38 +4,52 @@ import android.content.Context
 import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.SpikeLog
+import com.apex2060.softphone.config.ConfigStore
+import com.apex2060.softphone.config.PushConfig
 import com.google.firebase.messaging.FirebaseMessaging
+import java.util.concurrent.ConcurrentHashMap
 
-/** Firebase is called only when this build was compiled with google-services.json. */
+/**
+ * Tokens are per Firebase project. A line's `push` object selects a named secondary app.
+ * Lines without one use the default app from google-services.json, when that file was present.
+ */
 object PushRuntime {
-    @Volatile
-    var token: String? = null
-        private set
+    private val tokens = ConcurrentHashMap<String, String>()
 
-    fun start(context: Context) {
-        if (!BuildConfig.PUSH_ENABLED) {
-            SpikeLog.append("push disabled, no google-services.json")
-            return
+    fun start(context: Context) = sync(context)
+
+    /** Re-read every line's project and fetch its token. Safe to call after provision. */
+    fun sync(context: Context) {
+        val lines = ConfigStore.lines.value
+        val projects = lines.mapNotNull { it.config.push }.distinctBy { it.projectId }
+        if (BuildConfig.PUSH_ENABLED) {
+            fetchDefault(context)
         }
-        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-            if (!task.isSuccessful) {
-                SpikeLog.append("push token failed: ${task.exception?.javaClass?.simpleName}")
-                return@addOnCompleteListener
-            }
-            val next = task.result ?: return@addOnCompleteListener
-            onToken(context, next)
+        for (config in projects) {
+            fetchSecondary(context, config)
+        }
+        if (!BuildConfig.PUSH_ENABLED && projects.isEmpty() && lines.isNotEmpty()) {
+            SpikeLog.append("push off, no firebase project for these lines")
         }
     }
 
-    fun onToken(context: Context, next: String) {
-        if (!BuildConfig.PUSH_ENABLED || next.isBlank()) return
-        token = next
+    /** Default-app rotation. Secondary apps are refreshed by [sync]. */
+    fun onDefaultToken(context: Context, next: String) {
+        if (next.isBlank()) return
+        tokens[PushApps.DEFAULT] = next
         SpikeLog.noteSecret(next)
-        PushClient.publishToken(context, next)
+        val ids = ConfigStore.lines.value.filter { it.config.push == null }.map { it.id }.toSet()
+        if (ids.isNotEmpty()) PushClient.publish(context, next, ids)
+    }
+
+    /** Token already fetched for this ticket's line, if any. Omitted from the first provision. */
+    fun tokenForProvision(url: String): String? {
+        val line = ConfigStore.lines.value.firstOrNull { it.ticketUrl == url } ?: return null
+        val project = line.config.push?.projectId
+        return if (project != null) tokens[project] else tokens[PushApps.DEFAULT]
     }
 
     fun deliver(context: Context, data: Map<String, String>) {
-        if (!BuildConfig.PUSH_ENABLED) return
         val type = data["type"].orEmpty()
         val callUuid = data["callUuid"].orEmpty()
         if (callUuid.isBlank()) {
@@ -52,8 +66,14 @@ object PushRuntime {
         when (type) {
             "incoming_call" -> {
                 SpikeLog.append("push recv type=incoming_call callUuid=$callUuid ageMs=$age")
-                val from = data["from"].orEmpty()
-                val lines = linesForCalledNumber(data["to"].orEmpty())
+                val lines = PushRoute.select(
+                    ConfigStore.lines.value.filter { it.enabled }.map { line ->
+                        PushLine(line.id, line.config.sipUsername, line.ticketUrl, line.config.subtitle)
+                    },
+                    data["endpoint"],
+                    data["origin"],
+                    data["to"],
+                )
                 if (lines.isEmpty()) {
                     SpikeLog.append("push ignore no line")
                     return
@@ -61,7 +81,7 @@ object PushRuntime {
                 com.apex2060.softphone.phone.PhoneService.startForPush(context)
                 engine.wakeIncoming(
                     callUuid = callUuid,
-                    from = from,
+                    from = data["from"].orEmpty(),
                     fromName = data["fromName"].orEmpty(),
                     lineIds = lines,
                 )
@@ -71,6 +91,46 @@ object PushRuntime {
                 engine.cancelIncoming(callUuid)
             }
             else -> SpikeLog.append("push ignore unknown type")
+        }
+    }
+
+    private fun fetchDefault(context: Context) {
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (!task.isSuccessful) {
+                    SpikeLog.append("push token failed: ${task.exception?.javaClass?.simpleName}")
+                    return@addOnCompleteListener
+                }
+                val next = task.result ?: return@addOnCompleteListener
+                onDefaultToken(context, next)
+            }
+        } catch (e: Exception) {
+            SpikeLog.append("push default app unavailable: ${e.javaClass.simpleName}")
+        }
+    }
+
+    private fun fetchSecondary(context: Context, config: PushConfig) {
+        val app = try {
+            PushApps.ensure(context, config)
+        } catch (e: Exception) {
+            SpikeLog.append("push app init failed project=${config.projectId}: ${e.javaClass.simpleName}")
+            return
+        }
+        SpikeLog.noteSecret(config.apiKey)
+        SpikeLog.append("push app project=${config.projectId}")
+        PushApps.messaging(app).token.addOnCompleteListener { task ->
+            if (!task.isSuccessful) {
+                SpikeLog.append("push token failed project=${config.projectId}: ${task.exception?.javaClass?.simpleName}")
+                return@addOnCompleteListener
+            }
+            val next = task.result ?: return@addOnCompleteListener
+            tokens[config.projectId] = next
+            SpikeLog.noteSecret(next)
+            val ids = ConfigStore.lines.value
+                .filter { it.config.push?.projectId == config.projectId }
+                .map { it.id }
+                .toSet()
+            if (ids.isNotEmpty()) PushClient.publish(context, next, ids)
         }
     }
 }

@@ -18,11 +18,13 @@ import org.json.JSONObject
 object PushClient {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    fun publishToken(context: Context, token: String) {
-        if (!BuildConfig.PUSH_ENABLED || token.isBlank()) return
+    /** Posts this token only to [lineIds], each at its own provision origin. */
+    fun publish(context: Context, token: String, lineIds: Set<String>) {
+        if (token.isBlank() || lineIds.isEmpty()) return
         SpikeLog.noteSecret(token)
         scope.launch {
             for (line in ConfigStore.lines.value) {
+                if (line.id !in lineIds) continue
                 val ticket = line.ticket ?: continue
                 if (ticket.key.isNullOrBlank()) continue
                 val body = JSONObject()
@@ -49,7 +51,6 @@ object PushClient {
     }
 
     fun notifyReady(context: Context, lineId: String, callUuid: String) {
-        if (!BuildConfig.PUSH_ENABLED) return
         val line = ConfigStore.line(lineId) ?: return
         val ticket = line.ticket ?: return
         if (ticket.key.isNullOrBlank()) return
@@ -78,19 +79,6 @@ fun JSONObject.putPushFields(token: String?) {
     put("platform", "android")
     put("appVersion", BuildConfig.VERSION_NAME)
     put("deviceId", ConfigStore.deviceId())
-}
-
-fun linesForCalledNumber(to: String): Set<String> {
-    val enabled = ConfigStore.lines.value.filter { it.enabled }
-    val digits = SipPushMatch.digits(to)
-    if (digits.isEmpty()) return enabled.map { it.id }.toSet()
-    val hits = enabled.filter { line ->
-        val user = SipPushMatch.digits(line.config.sipUsername)
-        val sub = SipPushMatch.digits(line.config.subtitle.orEmpty())
-        (user.isNotEmpty() && (user.endsWith(digits) || digits.endsWith(user))) ||
-            (sub.length >= 7 && (sub.contains(digits) || digits.contains(sub)))
-    }
-    return (if (hits.isEmpty()) enabled else hits).map { it.id }.toSet()
 }
 
 /** Keeps the ticket URL and replaces only the action, for callers that already hold a ticket. */

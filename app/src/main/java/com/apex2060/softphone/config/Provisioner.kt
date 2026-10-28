@@ -54,7 +54,7 @@ object Provisioner {
                         .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
                         .put("android", Build.VERSION.RELEASE)
                         .put("app", BuildConfig.VERSION_NAME))
-                    .putPushFields(PushRuntime.token)
+                    .putPushFields(PushRuntime.tokenForProvision(ticket.url))
                     .toString()
             } else {
                 null

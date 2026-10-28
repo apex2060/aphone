@@ -5,6 +5,17 @@ import org.json.JSONObject
 
 data class SpeedDial(val label: String, val number: String)
 
+/**
+ * Public Firebase Android client values for the server that provisioned this line.
+ * Not a secret. Absent when the line uses the default app, or no push at all.
+ */
+data class PushConfig(
+    val projectId: String,
+    val applicationId: String,
+    val apiKey: String,
+    val gcmSenderId: String,
+)
+
 /** Colors are ARGB ints, ready for androidx.compose.ui.graphics.Color(int). */
 data class ThemeColors(
     val dark: Boolean,
@@ -34,6 +45,7 @@ data class ProvisionConfig(
     val historyLimit: Int,
     val adminPin: String?,
     val refreshHours: Int,
+    val push: PushConfig?,
 ) {
     companion object {
         val DEFAULT_THEME = ThemeColors(
@@ -105,7 +117,21 @@ data class ProvisionConfig(
                 historyLimit = root.optInt("historyLimit", 200).coerceIn(10, 5000),
                 adminPin = root.optString("adminPin").ifBlank { null },
                 refreshHours = root.optInt("refreshHours", 24).coerceAtLeast(0),
+                push = parsePush(root.optJSONObject("push")),
             )
+        }
+
+        /** Missing or incomplete `push` means this line does not name its own Firebase project. */
+        fun parsePush(raw: JSONObject?): PushConfig? {
+            if (raw == null) return null
+            val projectId = raw.optString("projectId").trim()
+            val applicationId = raw.optString("applicationId").trim()
+            val apiKey = raw.optString("apiKey").trim()
+            val gcmSenderId = raw.optString("gcmSenderId").trim()
+            if (projectId.isEmpty() || applicationId.isEmpty() || apiKey.isEmpty() || gcmSenderId.isEmpty()) {
+                return null
+            }
+            return PushConfig(projectId, applicationId, apiKey, gcmSenderId)
         }
     }
 }

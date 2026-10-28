@@ -49,6 +49,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.apex2060.softphone.config.ConfigStore
+import com.apex2060.softphone.push.PushRuntime
 import com.apex2060.softphone.config.LineChange
 import com.apex2060.softphone.config.Provisioner
 import com.google.zxing.BarcodeFormat
@@ -96,11 +97,13 @@ fun ScanScreen(onCancel: (() -> Unit)? = null) {
                 when (ConfigStore.upsert(ticket, json, config)) {
                     LineChange.FULL -> ScanState.Error("You can add up to 8 phones")
                     LineChange.UPDATED -> {
+                        PushRuntime.sync(context)
                         Toast.makeText(context, "Phone updated", Toast.LENGTH_SHORT).show()
                         onCancel?.invoke()
                         ScanState.Scanning
                     }
                     LineChange.ADDED -> {
+                        PushRuntime.sync(context)
                         onCancel?.invoke()
                         ScanState.Scanning
                     }

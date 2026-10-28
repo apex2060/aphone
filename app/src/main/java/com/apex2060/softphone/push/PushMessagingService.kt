@@ -5,7 +5,8 @@ import com.google.firebase.messaging.RemoteMessage
 
 class PushMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
-        PushRuntime.onToken(this, token)
+        PushRuntime.onDefaultToken(this, token)
+        PushRuntime.sync(this)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {

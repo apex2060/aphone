@@ -23,9 +23,12 @@ Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and op
 Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The application id stays
 `com.apex2060.softphone`.
 
-Push uses the existing ed22 Firebase Android app. `app/google-services.json` is not in git.
-If that file is absent at build time, push is compiled out and the phone keeps the always-on
-registration. Drop the file in `app/` and rebuild to turn push on. Do not commit it.
+A line's provisioning response can name that server's Firebase project (`push.projectId` and
+the other public client fields in [docs/PROVISIONING.md](docs/PROVISIONING.md)). The phone
+creates one Firebase app per project and sends that project's token only back to that line.
+Lines without `push` use the default app from `app/google-services.json` when the file was
+present at build time (the Ed 22 project). That file is not in git. If a line has neither,
+push stays off and that line keeps the always-on registration.
 
 Release builds accept only `https://` provisioning URLs. Debug builds also accept `http://` so a
 phone on the same LAN can reach the sample server.
