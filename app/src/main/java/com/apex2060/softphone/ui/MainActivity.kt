@@ -1,13 +1,11 @@
 package com.apex2060.softphone.ui
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.app.NotificationManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
 import android.graphics.Color
 import androidx.activity.ComponentActivity
@@ -24,8 +22,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.apex2060.softphone.SoftphoneApp
 import com.apex2060.softphone.config.ConfigStore
-import com.apex2060.softphone.phone.Notifications
-import com.apex2060.softphone.push.PushGate
 import com.apex2060.softphone.phone.PhoneService
 import com.apex2060.softphone.record.Recordings
 
@@ -49,7 +45,7 @@ class MainActivity : ComponentActivity() {
                 val permissions = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) {
-                    if (PushGate.suppressBatteryPrompt()) askFullScreenIntent() else askBatteryExemption()
+                    askFullScreenIntent()
                 }
                 LaunchedEffect(stored.joinToString { it.id }) {
                     if (ConfigStore.anyEnabled()) PhoneService.start(this@MainActivity)
@@ -87,7 +83,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (!ConfigStore.anyEnabled()) return
         (application as SoftphoneApp).engine.refreshRegistration("resume")
-        if (ConfigStore.askedBattery || PushGate.suppressBatteryPrompt()) askFullScreenIntent()
+        askFullScreenIntent()
     }
 
     private fun openCall() = startActivity(Intent(this, CallActivity::class.java))
@@ -96,20 +92,6 @@ class MainActivity : ComponentActivity() {
         if (intent?.getBooleanExtra(Recordings.EXTRA_PROMPT, false) != true) return
         intent.removeExtra(Recordings.EXTRA_PROMPT)
         Recordings.showPrompt(this)
-    }
-
-    @SuppressLint("BatteryLife")
-    private fun askBatteryExemption() {
-        if (ConfigStore.askedBattery) return
-        ConfigStore.askedBattery = true
-        val pm = getSystemService(PowerManager::class.java)
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            val opened = runCatching {
-                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-            }.isSuccess
-            if (opened) return
-        }
-        askFullScreenIntent()
     }
 
     private fun askFullScreenIntent() {

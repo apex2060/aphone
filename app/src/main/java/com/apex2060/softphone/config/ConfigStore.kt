@@ -66,7 +66,6 @@ object ConfigStore {
     private const val KEY_URL = "provision_url"
     private const val KEY_SECRET = "provision_key"
     private const val KEY_REFRESHED = "refreshed_at"
-    private const val KEY_ASKED_BATTERY = "asked_battery"
     private const val KEY_ASKED_FULL_SCREEN = "asked_full_screen"
     private const val KEY_OVERRIDE = "transport_override"
     private const val KEY_OUTBOUND = "outbound_route"
@@ -232,10 +231,6 @@ object ConfigStore {
     }
 
     private fun pushAcked(): Set<String> = prefs.getStringSet(KEY_PUSH_ACK, emptySet()).orEmpty()
-
-    var askedBattery: Boolean
-        get() = prefs.getBoolean(KEY_ASKED_BATTERY, false)
-        set(value) = prefs.edit().putBoolean(KEY_ASKED_BATTERY, value).apply()
 
     var askedFullScreen: Boolean
         get() = prefs.getBoolean(KEY_ASKED_FULL_SCREEN, false)

@@ -20,15 +20,18 @@ and becomes a dialer that makes calls, rings for incoming calls, and keeps a cal
 * **Reset:** long-press the title bar and enter the admin PIN.
 
 Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and optional
-Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The application id stays
-`com.apex2060.softphone`.
+Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The Play application id is
+`us.alphabetize.phone22`. Kotlin sources stay in `com.apex2060.softphone`.
 
 A line's provisioning response can name that server's Firebase project (`push.projectId` and
 the other public client fields in [docs/PROVISIONING.md](docs/PROVISIONING.md)). The phone
 creates one Firebase app per project and sends that project's token only back to that line.
 Lines without `push` use the default app from `app/google-services.json` when the file was
-present at build time (the Ed 22 project). That file is not in git. If a line has neither,
-push stays off and that line keeps the always-on registration.
+present at build time. That file is not in git. It must include an Android client whose
+`package_name` is `us.alphabetize.phone22` (Firebase project homeschool-express). CI reads it
+from the `GOOGLE_SERVICES_JSON_BASE64` secret and fails if that package is missing. If a line
+has neither its own `push` object nor that default client, push stays off and that line keeps
+the always-on registration.
 
 Release builds accept only `https://` provisioning URLs. Debug builds also accept `http://` so a
 phone on the same LAN can reach the sample server.
@@ -52,10 +55,11 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.0` and `versionCode` defaults to `21`. CI sets `versionName` from
-the git tag (`v1.0.1` becomes `1.0.1`) and `versionCode` from the GitHub Actions run number, which
-increases on every run. Pass `-PversionName` and `-PversionCode` to override either value. The
-keystore is never committed.
+`versionName` defaults to `1.3.4` and `versionCode` defaults to `25`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.4` and `25`). A tag run
+uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
+Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
+never committed.
 
 ### One-time signing setup
 
@@ -106,15 +110,17 @@ not upload an unsigned or debug-signed APK.
 
 The first build signed with this key will not install over a phone that still has an older
 debug-signed build. Uninstall that copy once. Later tags install over this one.
+`us.alphabetize.phone22` is a different app from `com.apex2060.softphone`, so the same
+certificate does not upgrade a sideload of the old id. Install this package beside it, or
+uninstall the old one, then scan the QR again.
 
 ## First run on a phone
 
 1. Install the APK and open it. Allow the camera.
 2. Scan the setup QR code.
-3. Allow the microphone and notifications. A build without push also asks once to ignore
-   battery optimisation, because otherwise Android may stop the always-on registration.
-   A push build does not ask for that exemption. Full-screen alerts are still requested so
-   a locked phone can show the answer screen.
+3. Allow the microphone and notifications. Full-screen alerts are requested so a locked
+   phone can show the answer screen. A line that push cannot wake stays registered in a
+   foreground service.
 
 ## Layout
 
@@ -141,7 +147,8 @@ GPL-2.0-only. The Open-source licenses screen in the app lists the same notices.
 
 ## Known limits
 
-* Incoming calls depend on the foreground service staying connected. That is reliable with the
-  battery exemption. Push wake-up is not in this build.
+* A line without push depends on its foreground service staying connected. Android may still
+  defer that service while the phone is optimizing battery use.
+* A line with push registers when a high-priority data message arrives.
 * The native library is arm64-v8a only.
 * One call at a time. A second incoming call while busy is rejected and logged as missed.

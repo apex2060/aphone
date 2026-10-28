@@ -119,9 +119,9 @@ placeholders in examples. Do not put a real key in this document.
 | `gcmSenderId` | Sender id, the numeric project number. |
 
 If `push` is missing or any field is blank, the phone does not create a secondary app for that
-line. It then uses the default Firebase app from `google-services.json` when this build has one
-(the Ed 22 project). If neither exists, push is off for that line and the phone keeps its
-registration open instead.
+line. It then uses the default Firebase app from `google-services.json` when this build has one.
+That file must contain `package_name` `us.alphabetize.phone22`. If neither exists, push is off
+for that line and the phone keeps its registration open instead.
 
 The phone asks Firebase for that app's token and sends it only to this line's provision origin:
 

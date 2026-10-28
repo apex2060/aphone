@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: "versionName when this run is not a tag (optional, for example 1.3.0)"
+        description: "versionName when this run is not a tag (optional, for example 1.3.4)"
         required: false
         type: string
       version_code:
-        description: "versionCode when this run is not a tag (optional, for example 21)"
+        description: "versionCode when this run is not a tag (optional, for example 25)"
         required: false
         type: string
 
@@ -43,10 +43,7 @@ jobs:
           umask 077
           mkdir -p app
           printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '[:space:]' | base64 -d > app/google-services.json
-          if ! grep -q 'com.apex2060.softphone' app/google-services.json; then
-            echo "::error::google-services.json must contain package_name com.apex2060.softphone."
-            exit 1
-          fi
+          python3 scripts/check-google-services-package.py
           echo "Wrote app/google-services.json. FCM push is enabled for this build."
       - name: Install Android SDK 36
         run: |
@@ -111,10 +108,7 @@ jobs:
           umask 077
           mkdir -p app
           printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '[:space:]' | base64 -d > app/google-services.json
-          if ! grep -q 'com.apex2060.softphone' app/google-services.json; then
-            echo "::error::google-services.json must contain package_name com.apex2060.softphone."
-            exit 1
-          fi
+          python3 scripts/check-google-services-package.py
           echo "Wrote app/google-services.json. FCM push is enabled for this build."
 
       - name: Install Android SDK 36
@@ -190,6 +184,7 @@ jobs:
           echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
           echo "VERSION_NAME=${version_name}" >> "$GITHUB_ENV"
           echo "VERSION_CODE=${version_code}" >> "$GITHUB_ENV"
+          echo "Resolved versionName=${version_name} versionCode=${version_code}"
 
       - name: Build signed release APK and AAB
         env:
@@ -238,6 +233,7 @@ jobs:
           fi
           badging="$("$aapt" dump badging dist/22phone.apk)"
           printf '%s\n' "$badging" | grep -E "package:|application-label:"
+          printf '%s\n' "$badging" | grep -F -q "package: name='us.alphabetize.phone22'"
           printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
           printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
           printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"

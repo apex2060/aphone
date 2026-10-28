@@ -145,10 +145,7 @@ jobs:
           umask 077
           mkdir -p app
           printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '[:space:]' | base64 -d > app/google-services.json
-          if ! grep -q 'com.apex2060.softphone' app/google-services.json; then
-            echo "::error::google-services.json must contain package_name com.apex2060.softphone."
-            exit 1
-          fi
+          python3 scripts/check-google-services-package.py
           echo "Wrote app/google-services.json. FCM push is enabled for this build."
 
       - name: Install Android SDK 36
@@ -229,12 +226,12 @@ jobs:
             exit 1
           fi
           if ! printf '%s\n' "$certs" | grep -q "CN=22 Phone"; then
-            echo "::error::APK is not signed with CN=22 Phone, so it cannot upgrade v1.0.5."
+            echo "::error::APK is not signed with CN=22 Phone."
             exit 1
           fi
           badging="$("$aapt" dump badging dist/22phone.apk)"
           printf '%s\n' "$badging" | grep -E "package:|application-label:|native-code:"
-          printf '%s\n' "$badging" | grep -F -q "package: name='com.apex2060.softphone'"
+          printf '%s\n' "$badging" | grep -F -q "package: name='us.alphabetize.phone22'"
           printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
           printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
           printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"
@@ -358,15 +355,15 @@ jobs:
             notes=$(printf '%s\n' \
               "Signed 22 Phone test build. This is not a v* release and it is not merged." \
               "" \
-              "- package: com.apex2060.softphone" \
+              "- package: us.alphabetize.phone22" \
               "- versionName: ${VERSION_NAME}" \
-              "- versionCode: ${VERSION_CODE} (v1.0.5 is versionCode 14)" \
+              "- versionCode: ${VERSION_CODE}" \
               "- label: 22 Phone" \
               "- targetSdk: 36" \
               "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
               "" \
               "22phone.apk is the sideload build. 22phone.aab is the Play App Bundle, signed with the same key." \
-              "Install the APK over 22 Phone v1.0.5. The signing certificate is CN=22 Phone." \
+              "The signing certificate is CN=22 Phone. This package does not upgrade an install of com.apex2060.softphone." \
               "Source for this binary is this tag plus the upstream tarballs named in sipspike/third_party/VERSIONS.txt.")
           else
             assets=(dist/22siptest.apk)

@@ -17,6 +17,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.CallPhase
 import com.apex2060.softphone.Registration
 import com.apex2060.softphone.SoftphoneApp
@@ -292,10 +293,10 @@ class PhoneService : Service() {
 
     companion object {
         private const val REGISTER_REFRESH_MS = 90_000L
-        const val ACTION_DECLINE = "com.apex2060.softphone.DECLINE"
-        const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
-        const val ACTION_PUSH = "com.apex2060.softphone.PUSH"
-        const val ACTION_PROMOTE = "com.apex2060.softphone.PROMOTE"
+        const val ACTION_DECLINE = "${BuildConfig.APPLICATION_ID}.DECLINE"
+        const val ACTION_HANGUP = "${BuildConfig.APPLICATION_ID}.HANGUP"
+        const val ACTION_PUSH = "${BuildConfig.APPLICATION_ID}.PUSH"
+        const val ACTION_PROMOTE = "${BuildConfig.APPLICATION_ID}.PROMOTE"
 
         @Volatile
         var nextMode: FgsMode? = null

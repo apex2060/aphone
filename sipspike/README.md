@@ -1,7 +1,7 @@
 # 22 SIP Test
 
 A throwaway arm64 softphone for the IPv6 spike. It installs beside 22 Phone
-(`com.apex2060.softphone`) because its id is `com.twentytwo.phone.sipspike`
+(`us.alphabetize.phone22`) because its id is `com.twentytwo.phone.sipspike`
 and its label is **22 SIP Test**. It does not change how 22 Phone registers
 or places calls.
 

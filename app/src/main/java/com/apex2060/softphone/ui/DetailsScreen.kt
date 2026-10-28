@@ -142,7 +142,6 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
                 StatusLine("RTP", "in=${status?.rtpIn ?: 0} out=${status?.rtpOut ?: 0}")
                 StatusLine("Notifications", if (Notifications.notificationsAllowed(context)) "allowed" else "denied")
                 StatusLine("Full-screen alerts", if (Notifications.canUseFullScreenIntent(context)) "allowed" else "denied")
-                StatusLine("Battery", if (Notifications.batteryUnrestricted(context)) "unrestricted" else "optimized")
                 Text("Outgoing route", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
                 OutboundRoute.entries.forEach { route ->
                     OverrideRow(route.uiLabel, outbound == route) {
@@ -165,18 +164,6 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
                             )
                         }
                     }) { Text("Allow notifications") }
-                }
-                if (!Notifications.batteryUnrestricted(context)) {
-                    TextButton(onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(
-                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                    Uri.parse("package:${context.packageName}"),
-                                )
-                            )
-                        }
-                    }) { Text("Unrestrict battery") }
                 }
                 if (!Notifications.canUseFullScreenIntent(context) && Build.VERSION.SDK_INT >= 34) {
                     TextButton(onClick = {
@@ -277,7 +264,6 @@ fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit)
                     }
                     StatusLine("Notifications", if (Notifications.notificationsAllowed(context)) "allowed" else "denied")
                     StatusLine("Full-screen alerts", if (Notifications.canUseFullScreenIntent(context)) "allowed" else "denied")
-                    StatusLine("Battery", if (Notifications.batteryUnrestricted(context)) "unrestricted" else "optimized")
                     DeviceAccessLinks(context)
                     AboutLinks(onLicenses = { showLicenses = true })
                 }
@@ -319,18 +305,6 @@ private fun DeviceAccessLinks(context: android.content.Context) {
                 )
             }
         }) { Text("Allow notifications") }
-    }
-    if (!Notifications.batteryUnrestricted(context)) {
-        TextButton(onClick = {
-            runCatching {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:${context.packageName}"),
-                    )
-                )
-            }
-        }) { Text("Unrestrict battery") }
     }
     if (!Notifications.canUseFullScreenIntent(context) && Build.VERSION.SDK_INT >= 34) {
         TextButton(onClick = {

@@ -16,15 +16,15 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.3.3"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 24
+    ?: "1.3.4"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 25
 
 android {
     namespace = "com.apex2060.softphone"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.apex2060.softphone"
+        applicationId = "us.alphabetize.phone22"
         minSdk = 26
         targetSdk = 36
         versionCode = releaseVersionCode
@@ -165,5 +165,34 @@ dependencies {
 }
 
 if (pushEnabled) {
+    // The plugin selects client[].client_info.android_client_info.package_name == applicationId.
+    // Fail here, before that task, when the file has no such client.
+    val expectedPackage = android.defaultConfig.applicationId
+        ?: throw GradleException("applicationId is not set.")
+    val servicesFile = file("google-services.json")
+    val parsed = try {
+        @Suppress("UNCHECKED_CAST")
+        groovy.json.JsonSlurper().parse(servicesFile) as Map<*, *>
+    } catch (e: Exception) {
+        throw GradleException(
+            "app/google-services.json is not valid JSON. CI secret GOOGLE_SERVICES_JSON_BASE64 " +
+                "must be a base64-encoded google-services.json with an Android client whose " +
+                "package_name is $expectedPackage.",
+            e,
+        )
+    }
+    val packages = (parsed["client"] as? List<*>).orEmpty().mapNotNull { client ->
+        val info = (client as? Map<*, *>)?.get("client_info") as? Map<*, *>
+        val androidInfo = info?.get("android_client_info") as? Map<*, *>
+        androidInfo?.get("package_name") as? String
+    }
+    if (expectedPackage !in packages) {
+        val shown = if (packages.isEmpty()) "(none)" else packages.joinToString(", ")
+        throw GradleException(
+            "app/google-services.json has no Android client with package_name $expectedPackage " +
+                "(found: $shown). CI secret GOOGLE_SERVICES_JSON_BASE64 must include that client. " +
+                "The google-services plugin uses the client that matches applicationId.",
+        )
+    }
     apply(plugin = "com.google.gms.google-services")
 }

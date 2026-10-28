@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import androidx.core.content.ContextCompat
@@ -193,7 +192,4 @@ object Notifications {
         if (Build.VERSION.SDK_INT < 34) return true
         return context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
     }
-
-    fun batteryUnrestricted(context: Context): Boolean =
-        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
 }

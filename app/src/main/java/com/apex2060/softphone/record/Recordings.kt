@@ -3,6 +3,7 @@ package com.apex2060.softphone.record
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
+import com.apex2060.softphone.BuildConfig
 import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.history.CallHistory
@@ -25,9 +26,9 @@ data class PendingRecording(
 object Recordings {
     const val EXTRA_PROMPT = "recording_prompt"
     const val EXTRA_TOKEN = "token"
-    const val ACTION_SAVE = "com.apex2060.softphone.RECORDING_SAVE"
-    const val ACTION_DISCARD = "com.apex2060.softphone.RECORDING_DISCARD"
-    const val ACTION_DISMISSED = "com.apex2060.softphone.RECORDING_DISMISSED"
+    const val ACTION_SAVE = "${BuildConfig.APPLICATION_ID}.RECORDING_SAVE"
+    const val ACTION_DISCARD = "${BuildConfig.APPLICATION_ID}.RECORDING_DISCARD"
+    const val ACTION_DISMISSED = "${BuildConfig.APPLICATION_ID}.RECORDING_DISMISSED"
 
     private const val PREFS = "recordings"
     private const val K_PATH = "pending_path"
