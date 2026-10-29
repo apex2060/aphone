@@ -18,7 +18,8 @@ and becomes a dialer that makes calls, rings for incoming calls, and keeps a cal
 * **Remote control of the fleet:** the phone re-fetches its document every `refreshHours`, and
   an HTTP `410` from your server removes that phone from the list.
 * **Remove:** each phone has a Remove button. Confirming it unregisters that line and
-  deletes its saved setup on this device. No admin PIN. The admin PIN still guards auto-record.
+  deletes its saved setup on this device. Turning auto-record on asks for a confirmation.
+  Neither action asks for an admin PIN.
 
 Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and optional
 Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The Play application id is
@@ -56,8 +57,8 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.7` and `versionCode` defaults to `28`. A manual Build APK run
-uses the `version_name` and `version_code` inputs (for example `1.3.7` and `28`). A tag run
+`versionName` defaults to `1.3.8` and `versionCode` defaults to `29`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.8` and `29`). A tag run
 uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
 Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
 never committed.

@@ -167,7 +167,8 @@ named `X-Call-UUID` or any `X-PH-` header whose name contains `Call-UUID`, case-
 ## 3. Removing a phone
 
 Each phone on the list has Remove. Confirming it unregisters that line and deletes its saved
-setup and call history on this device. No admin PIN. The admin PIN still guards auto-record.
+setup and call history on this device. Turning auto-record on asks for a confirmation.
+Neither action asks for an admin PIN.
 
 `v` and `c` query parameters on a setup URL are removed before every `phone.*` request,
 including URLs saved from an earlier scan. Host and path stay. The request keeps `action`.

@@ -18,13 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -41,8 +39,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -74,7 +70,7 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
     val probe by ClientProbe.text.collectAsState()
     val autoRecording by ConfigStore.autoRecording.collectAsState()
     var confirmRemove by remember { mutableStateOf(false) }
-    var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
+    var confirmRecord by remember { mutableStateOf(false) }
     var showLicenses by remember { mutableStateOf(false) }
     if (showLicenses) {
         LicensesScreen(onBack = { showLicenses = false })
@@ -122,8 +118,7 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
                     Switch(
                         checked = autoRecording,
                         onCheckedChange = { want ->
-                            val pin = line.config.adminPin
-                            if (pin == null) ConfigStore.setAutoRecording(want) else pendingRecord = want
+                            if (want) confirmRecord = true else ConfigStore.setAutoRecording(false)
                         },
                     )
                 }
@@ -190,14 +185,12 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
             }
         }
     }
-    val requested = pendingRecord
-    if (requested != null) {
-        RecordingPinDialog(
-            accept = { it == line.config.adminPin },
-            onDismiss = { pendingRecord = null },
+    if (confirmRecord) {
+        RecordingConfirmDialog(
+            onDismiss = { confirmRecord = false },
             onConfirm = {
-                ConfigStore.setAutoRecording(requested)
-                pendingRecord = null
+                ConfigStore.setAutoRecording(true)
+                confirmRecord = false
             },
         )
     }
@@ -217,10 +210,8 @@ fun DetailsScreen(engine: SipEngine, lineId: String, onBack: () -> Unit, onHome:
 fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
-    val stored by ConfigStore.lines.collectAsState()
-    val pins = stored.mapNotNull { it.config.adminPin }
     val autoRecording by ConfigStore.autoRecording.collectAsState()
-    var pendingRecord by remember { mutableStateOf<Boolean?>(null) }
+    var confirmRecord by remember { mutableStateOf(false) }
     var showLicenses by remember { mutableStateOf(false) }
     if (showLicenses) {
         LicensesScreen(onBack = { showLicenses = false })
@@ -254,7 +245,7 @@ fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit)
                         Switch(
                             checked = autoRecording,
                             onCheckedChange = { want ->
-                                if (pins.isEmpty()) ConfigStore.setAutoRecording(want) else pendingRecord = want
+                                if (want) confirmRecord = true else ConfigStore.setAutoRecording(false)
                             },
                         )
                     }
@@ -277,14 +268,12 @@ fun AppSettingsScreen(engine: SipEngine, onBack: () -> Unit, onHome: () -> Unit)
             }
         }
     }
-    val requested = pendingRecord
-    if (requested != null) {
-        RecordingPinDialog(
-            accept = { it in pins },
-            onDismiss = { pendingRecord = null },
+    if (confirmRecord) {
+        RecordingConfirmDialog(
+            onDismiss = { confirmRecord = false },
             onConfirm = {
-                ConfigStore.setAutoRecording(requested)
-                pendingRecord = null
+                ConfigStore.setAutoRecording(true)
+                confirmRecord = false
             },
         )
     }
@@ -314,28 +303,17 @@ private fun DeviceAccessLinks(context: android.content.Context) {
 }
 
 @Composable
-private fun RecordingPinDialog(accept: (String) -> Boolean, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    var pin by remember { mutableStateOf("") }
-    var wrong by remember { mutableStateOf(false) }
+private fun RecordingConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Admin PIN") },
+        title = { Text("Turn on call recording?") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Enter the admin PIN to change auto-record.")
-                OutlinedTextField(
-                    value = pin,
-                    onValueChange = { pin = it; wrong = false },
-                    label = { Text("Admin PIN") },
-                    isError = wrong,
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                )
-            }
+            Text(
+                "Recording laws differ by state and country. Some places require everyone on the call to agree before it's recorded. You are responsible for knowing and following the laws that apply to your calls, including telling the other person when required.",
+            )
         },
         confirmButton = {
-            TextButton(onClick = { if (accept(pin)) onConfirm() else wrong = true }) { Text("OK") }
+            TextButton(onClick = onConfirm) { Text("I understand, turn on") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
