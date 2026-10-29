@@ -314,7 +314,7 @@ private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
             textAlign = TextAlign.Center,
         )
         Text(
-            "Add a phone by scanning its setup QR code.",
+            "Ask your business manager for a QR code to set up your phone.",
             modifier = Modifier.padding(top = 8.dp),
             style = MaterialTheme.typography.bodyLarge,
             textAlign = TextAlign.Center,

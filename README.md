@@ -57,8 +57,8 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.9` and `versionCode` defaults to `30`. A manual Build APK run
-uses the `version_name` and `version_code` inputs (for example `1.3.9` and `30`). A tag run
+`versionName` defaults to `1.3.10` and `versionCode` defaults to `31`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.10` and `31`). A tag run
 uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
 Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
 never committed.
