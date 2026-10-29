@@ -1,5 +1,7 @@
 package com.apex2060.softphone.ui
 
+import android.content.Intent
+import android.net.Uri
 import android.text.format.DateUtils
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -27,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -267,7 +270,7 @@ private fun PhoneList(
             )
         }
         item {
-            TextButton(
+            AddPhoneButton(
                 onClick = {
                     if (stored.size >= LineLogic.MAX_LINES) {
                         Toast.makeText(context, "You can add up to ${LineLogic.MAX_LINES} phones", Toast.LENGTH_SHORT).show()
@@ -275,14 +278,28 @@ private fun PhoneList(
                         onAdd()
                     }
                 },
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            ) { Text("Add phone") }
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            )
         }
     }
 }
 
 @Composable
+private fun AddPhoneButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Button(onClick = onClick, modifier = modifier.fillMaxWidth()) {
+        Icon(
+            painterResource(R.drawable.ic_add),
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text("Add phone")
+    }
+}
+
+@Composable
 private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     Column(
         modifier
             .fillMaxSize()
@@ -303,8 +320,24 @@ private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(onClick = onAdd, modifier = Modifier.padding(top = 24.dp)) {
-            Text("Add phone")
+        AddPhoneButton(onClick = onAdd, modifier = Modifier.padding(top = 24.dp))
+        OutlinedCard(Modifier.fillMaxWidth().padding(top = 28.dp)) {
+            Column(Modifier.padding(16.dp)) {
+                Text("New to 22 Phone?", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "22 Phone connects to phone lines you set up on Alphabetize. Create an account at alphabetize.us, add a number and a phone there, then tap Add phone and scan the QR code it shows.",
+                    modifier = Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                TextButton(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://alphabetize.us")))
+                        }
+                    },
+                    modifier = Modifier.padding(top = 4.dp),
+                ) { Text("Create an account") }
+            }
         }
     }
 }
