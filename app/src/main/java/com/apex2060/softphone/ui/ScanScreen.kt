@@ -48,10 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import com.apex2060.softphone.config.ConfigStore
-import com.apex2060.softphone.push.PushRuntime
-import com.apex2060.softphone.config.LineChange
 import com.apex2060.softphone.config.Provisioner
+import com.apex2060.softphone.config.SetupFlow
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
@@ -92,24 +90,18 @@ fun ScanScreen(onCancel: () -> Unit) {
         }
         state = ScanState.Fetching
         scope.launch {
-            state = try {
-                val (json, config) = Provisioner.fetch(ticket)
-                when (ConfigStore.upsert(ticket, json, config)) {
-                    LineChange.FULL -> ScanState.Error("You can add up to 8 phones")
-                    LineChange.UPDATED -> {
-                        PushRuntime.sync(context)
-                        Toast.makeText(context, "Phone updated", Toast.LENGTH_SHORT).show()
-                        onCancel()
-                        ScanState.Scanning
-                    }
-                    LineChange.ADDED -> {
-                        PushRuntime.sync(context)
-                        onCancel()
-                        ScanState.Scanning
-                    }
+            state = when (val outcome = SetupFlow.provision(context, ticket)) {
+                SetupFlow.Outcome.Full -> ScanState.Error("You can add up to 8 phones")
+                SetupFlow.Outcome.Updated -> {
+                    Toast.makeText(context, "Phone updated", Toast.LENGTH_SHORT).show()
+                    onCancel()
+                    ScanState.Scanning
                 }
-            } catch (e: Exception) {
-                ScanState.Error(e.message ?: "Setup failed")
+                SetupFlow.Outcome.Added -> {
+                    onCancel()
+                    ScanState.Scanning
+                }
+                is SetupFlow.Outcome.Failed -> ScanState.Error(outcome.message)
             }
         }
     }

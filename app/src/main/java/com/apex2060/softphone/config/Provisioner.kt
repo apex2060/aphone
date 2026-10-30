@@ -11,7 +11,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
+import java.net.URLDecoder
+import java.util.Base64
 
 /** What the setup QR code carries: the endpoint to call and the key to present. */
 data class ProvisionTicket(val url: String, val key: String?)
@@ -38,6 +41,84 @@ object Provisioner {
         } ?: return null
         val secure = ticket.url.startsWith("https://")
         return if (secure || (BuildConfig.DEBUG && ticket.url.startsWith("http://"))) ticket else null
+    }
+
+    /**
+     * A Comm Manager setup link. `t` is base64url for the same JSON [parseQr] accepts.
+     * The ticket URL must be https on a release build and its host must be allowlisted.
+     */
+    fun parseLink(uri: android.net.Uri): ProvisionTicket? = parseLink(uri.toString())
+
+    fun parseLink(raw: String): ProvisionTicket? = parseLink(raw, release = !BuildConfig.DEBUG)
+
+    internal fun parseLink(raw: String, release: Boolean): ProvisionTicket? {
+        val uri = try {
+            URI(raw.trim())
+        } catch (_: Exception) {
+            return null
+        }
+        if (!isSetupLink(uri)) return null
+        val encoded = param(uri.rawFragment, "t") ?: param(uri.rawQuery, "t") ?: return null
+        val json = decodeBase64Url(encoded) ?: return null
+        val ticket = parseQr(json) ?: return null
+        if (release && !ticket.url.startsWith("https://")) return null
+        val host = runCatching { URI(ticket.url).host }.getOrNull()?.lowercase() ?: return null
+        if (host !in ALLOWED_TICKET_HOSTS) return null
+        return ticket
+    }
+
+    internal fun isSetupLink(raw: String): Boolean = try {
+        isSetupLink(URI(raw.trim()))
+    } catch (_: Exception) {
+        false
+    }
+
+    fun ticketHost(url: String): String =
+        runCatching { URI(url).host }.getOrNull()?.ifBlank { null } ?: "the server"
+
+    private val ALLOWED_TICKET_HOSTS = setOf(
+        "a.alphabetize.us",
+        "us.ed22.org",
+        "my.latterday.works",
+    )
+
+    private fun isSetupLink(uri: URI): Boolean {
+        val scheme = uri.scheme?.lowercase() ?: return false
+        val host = uri.host?.lowercase() ?: return false
+        return when (scheme) {
+            "phone22" -> host == "setup"
+            "https" -> host == "a.alphabetize.us" && uri.path?.trimEnd('/') == "/22phone/setup"
+            else -> false
+        }
+    }
+
+    private fun param(source: String?, name: String): String? {
+        if (source.isNullOrBlank()) return null
+        for (part in source.split('&')) {
+            val eq = part.indexOf('=')
+            val key = if (eq < 0) part else part.substring(0, eq)
+            if (!key.equals(name, ignoreCase = true)) continue
+            val value = if (eq < 0) "" else part.substring(eq + 1)
+            if (value.isEmpty()) return null
+            return try {
+                URLDecoder.decode(value, "UTF-8")
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return null
+    }
+
+    private fun decodeBase64Url(encoded: String): String? {
+        val trimmed = encoded.trim()
+        if (trimmed.isEmpty() || trimmed.any { it.isWhitespace() }) return null
+        val pad = (4 - trimmed.length % 4) % 4
+        val padded = trimmed + "=".repeat(pad)
+        return try {
+            String(Base64.getUrlDecoder().decode(padded), Charsets.UTF_8)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
     }
 
     /** Fetches the provisioning document. Returns the raw JSON and the parsed config. */

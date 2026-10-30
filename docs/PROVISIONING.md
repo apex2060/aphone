@@ -28,7 +28,15 @@ X-Provision-Key: front-desk-7f3a9c
 for example `https://phones.example.com/provision?key=front-desk-7f3a9c`.
 
 Release builds only accept `https://` URLs. Debug builds also accept `http://` so you can test
-against a laptop on the LAN.
+against a laptop on the LAN. A setup link only accepts ticket hosts `a.alphabetize.us`,
+`us.ed22.org`, and `my.latterday.works`.
+
+A tap link carries that same JSON, base64url-encoded, as `t`:
+
+* `phone22://setup?t=<base64url>`
+* `https://a.alphabetize.us/22phone/setup#t=<base64url>` (`t` in the query is also accepted)
+
+The phone asks before it saves the line. A bad link is not logged.
 
 Generate a code with any QR tool, for example:
 
