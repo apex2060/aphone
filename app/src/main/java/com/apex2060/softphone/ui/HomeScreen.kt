@@ -312,6 +312,7 @@ private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
             "No phones yet",
             style = MaterialTheme.typography.headlineSmall,
             textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onBackground,
         )
         Text(
             "Ask your business manager for a QR code to set up your phone.",
@@ -325,14 +326,14 @@ private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
             Column(Modifier.padding(16.dp)) {
                 Text("New to 22 Phone?", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "22 Phone connects to phone lines you set up on Alphabetize. Create an account at alphabetize.us, add a number and a phone there, then tap Add phone and scan the QR code it shows.",
+                    "22 Phone connects to phone lines you set up on Alphabetize. Create an account, add a number and a phone there, then tap Add phone and scan the QR code it shows.",
                     modifier = Modifier.padding(top = 8.dp),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 TextButton(
                     onClick = {
                         runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://alphabetize.us")))
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://a.alphabetize.us/main")))
                         }
                     },
                     modifier = Modifier.padding(top = 4.dp),
