@@ -11,3 +11,5 @@ server/devices.json
 *.keystore
 *.p12
 keystore.properties
+app/google-services.json
+google-services.json

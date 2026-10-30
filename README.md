@@ -1,22 +1,39 @@
 # 22 Phone
 
-An Android phone app for Plivo. A fresh install shows nothing but a QR scanner. Scan a
-setup code and the phone pulls its SIP credentials, title and colors from your server, registers
-with Plivo, and becomes a dialer that makes calls, rings for incoming calls, and keeps a call history.
+An Android phone app. Opening it shows the list of phones. Tap Add phone and scan a
+setup code. The phone pulls its SIP credentials, title and colors from your server, registers,
+and becomes a dialer that makes calls, rings for incoming calls, and keeps a call history.
 
 * **Provisioning:** QR code with a URL and key, then a JSON document from your server. See
   [docs/PROVISIONING.md](docs/PROVISIONING.md) for the schema and [server/](server/) for a
   zero-dependency sample endpoint.
-* **Calling:** Plivo Android SDK (`com.plivo.endpoint:endpoint`) logged in with endpoint credentials.
-* **Incoming calls:** a foreground service keeps the registration open, posts a full-screen
-  ringing notification with Answer and Decline, and logs missed calls.
+* **Calling:** PJSIP 2.17 (`libpjsua2`), the same registration and call plan as 22 SIP Test 0.5.
+  The Plivo Android SDK is not part of this app. Credentials are still the endpoint username
+  and password from the provisioning document.
+* **Incoming calls:** with Firebase configured, a high-priority data push wakes the phone,
+  which registers, tells the server it is ready, and rings. The in-app call screen is the
+  only prompt while the phone is unlocked and the app is in front. A notification with
+  Answer and Decline is used when the app is in the background or the screen is locked.
 * **History:** a local SQLite log of incoming, outgoing, missed and declined calls, with tap to call back.
 * **Remote control of the fleet:** the phone re-fetches its document every `refreshHours`, and
-  an HTTP `410` from your server wipes it back to the scanner.
-* **Reset:** long-press the title bar and enter the admin PIN.
+  an HTTP `410` from your server removes that phone from the list.
+* **Remove:** each phone has a Remove button. Confirming it unregisters that line and
+  deletes its saved setup on this device. Turning auto-record on asks for a confirmation.
+  Neither action asks for an admin PIN.
 
-Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning. No Google Play services or Firebase
-needed. minSdk 26 (Android 8), target 35. The application id stays `com.apex2060.softphone`.
+Stack: Kotlin, Jetpack Compose, CameraX + zxing for scanning, PJSIP 2.17, and optional
+Firebase Cloud Messaging. minSdk 26 (Android 8), target 36. The Play application id is
+`us.alphabetize.phone22`. Kotlin sources stay in `com.apex2060.softphone`.
+
+A line's provisioning response can name that server's Firebase project (`push.projectId` and
+the other public client fields in [docs/PROVISIONING.md](docs/PROVISIONING.md)). The phone
+creates one Firebase app per project and sends that project's token only back to that line.
+Lines without `push` use the default app from `app/google-services.json` when the file was
+present at build time. That file is not in git. It must include an Android client whose
+`package_name` is `us.alphabetize.phone22` (Firebase project homeschool-express). CI reads it
+from the `GOOGLE_SERVICES_JSON_BASE64` secret and fails if that package is missing. If a line
+has neither its own `push` object nor that default client, incoming calls are not woken in
+the background. Placing a call still registers that line.
 
 Release builds accept only `https://` provisioning URLs. Debug builds also accept `http://` so a
 phone on the same LAN can reach the sample server.
@@ -40,10 +57,11 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.0.0` and `versionCode` defaults to `1`. CI sets `versionName` from
-the git tag (`v1.0.1` becomes `1.0.1`) and `versionCode` from the GitHub Actions run number, which
-increases on every run. Pass `-PversionName` and `-PversionCode` to override either value. The
-keystore is never committed.
+`versionName` defaults to `1.3.12` and `versionCode` defaults to `33`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.12` and `33`). A tag run
+uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
+Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
+never committed.
 
 ### One-time signing setup
 
@@ -94,30 +112,46 @@ not upload an unsigned or debug-signed APK.
 
 The first build signed with this key will not install over a phone that still has an older
 debug-signed build. Uninstall that copy once. Later tags install over this one.
+`us.alphabetize.phone22` is a different app from `com.apex2060.softphone`, so the same
+certificate does not upgrade a sideload of the old id. Install this package beside it, or
+uninstall the old one, then scan the QR again.
 
 ## First run on a phone
 
-1. Install the APK and open it. Allow the camera.
-2. Scan the setup QR code.
-3. Allow the microphone and notifications, and allow the app to ignore battery optimisation
-   (it asks once). Without that, Android may stop the connection and the phone won't ring.
+1. Install the APK and open it. The phone list is empty until you add one.
+2. Tap Add phone and allow the camera.
+3. Scan the setup QR code.
+4. Allow the microphone and notifications. Full-screen alerts are requested so a locked
+   phone can show the answer screen. A line that push cannot wake stays registered in a
+   foreground service.
 
 ## Layout
 
 ```
 app/src/main/java/com/apex2060/softphone/
   config/   ProvisionConfig (schema), Provisioner (QR + HTTP), ConfigStore (persistence)
-  phone/    PhoneManager (Plivo endpoint + call state), PhoneService (foreground service),
-            Notifications, BootReceiver
+  phone/    PhoneService (foreground service), Notifications
+  SipEngine.kt and the classes next to it  PJSIP registration, calls, and the on/off switch
   history/  CallHistory (SQLite)
   ui/       MainActivity, ScanScreen, HomeScreen (keypad, contacts, recents), CallActivity, Theme
 server/     sample provisioning endpoint
 docs/       provisioning schema
 ```
 
+## License
+
+22 Phone is free software under the GNU General Public License, version 2 or, at your
+option, any later version. See [LICENSE](LICENSE). PJSIP is GPL-2.0-or-later. OpenSSL and
+the AndroidX / Kotlin / Compose / CameraX / ZXing libraries are Apache-2.0.
+
+Apache-2.0 software can be combined with a GPL-2.0-or-later program when the combined work
+is distributed under GPL version 3 (the "or later" option). It would not be compatible with
+GPL-2.0-only. The Open-source licenses screen in the app lists the same notices.
+
 ## Known limits
 
-* Incoming calls depend on the foreground service staying connected. That is reliable with the
-  battery exemption, but a Firebase push setup (Plivo supports it) would be more robust on
-  aggressive OEM battery managers.
+* A line without push is not kept registered in the background. It registers when you place
+  a call. Incoming calls need a push wake-up.
+* A line with push registers when a high-priority data message arrives.
+* The native library is arm64-v8a only.
 * One call at a time. A second incoming call while busy is rejected and logged as missed.

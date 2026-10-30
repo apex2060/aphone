@@ -1,7 +1,7 @@
-# Plivo SDK and its bundled WebRTC use JNI and reflection.
--keep class com.plivo.** { *; }
--keep class org.webrtc.** { *; }
--dontwarn com.plivo.**
--dontwarn org.webrtc.**
--dontwarn org.slf4j.**
+# pjsua2 calls back into these classes by JNI name. Release minify is off;
+# these rules are here if it is turned on later.
+-keep class org.pjsip.** { *; }
+-keep class com.apex2060.softphone.SipEngine { *; }
+-keep class com.apex2060.softphone.SipEngine$* { *; }
+-dontwarn org.pjsip.**
 -dontwarn javax.annotation.**

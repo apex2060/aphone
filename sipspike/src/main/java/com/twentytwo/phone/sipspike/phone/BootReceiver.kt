@@ -1,12 +1,12 @@
-package com.apex2060.softphone.phone
+package com.twentytwo.phone.sipspike.phone
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.apex2060.softphone.config.ConfigStore
+import com.twentytwo.phone.sipspike.config.ConfigStore
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (ConfigStore.config.value != null) PhoneService.start(context)
+        if (ConfigStore.config.value != null) SpikeService.start(context)
     }
 }

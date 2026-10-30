@@ -1,5 +1,6 @@
 package com.apex2060.softphone.phone
 
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
@@ -9,24 +10,26 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.apex2060.softphone.BuildConfig
+import com.apex2060.softphone.CallPhase
+import com.apex2060.softphone.Registration
+import com.apex2060.softphone.SoftphoneApp
+import com.apex2060.softphone.SpikeLog
 import com.apex2060.softphone.config.ConfigStore
 import com.apex2060.softphone.config.Provisioner
+import com.apex2060.softphone.push.PushRuntime
 import com.apex2060.softphone.config.RevokedException
 import com.apex2060.softphone.history.CallHistory
 import com.apex2060.softphone.history.Outcome
+import com.apex2060.softphone.record.Recordings
 import com.apex2060.softphone.ui.CallActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,57 +37,70 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-/**
- * Keeps the Plivo registration alive while the app is in the background, rings for incoming calls,
- * and holds microphone access during a call.
- */
+/** Keeps registration up, rings, and refreshes the provisioning document. */
 class PhoneService : Service() {
+    enum class FgsMode { SHORT, MICROPHONE }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var lastPhase: CallPhase? = null
     private var ringing = false
+    /** True while the foreground or incoming notification is a CallStyle. */
+    private var callNotificationPosted = false
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var screenWake: PowerManager.WakeLock? = null
     private var stayAwake: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    private val engine get() = (application as SoftphoneApp).engine
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        goForeground(Notifications.status(this, PhoneManager.registration.value, null), mic = false)
-        acquireKeepAlive()
-        watchNetwork()
-
-        scope.launch {
-            ConfigStore.config.collect { cfg ->
-                if (cfg == null) {
-                    PhoneManager.logout()
-                    stopSelf()
-                } else {
-                    PhoneManager.login(cfg.sipUsername, cfg.sipPassword)
-                }
-            }
+        goForeground(Notifications.status(this, engine.registration.value, null), mode = nextMode ?: idleMode())
+        nextMode = null
+        if (!ConfigStore.anyEnabled()) {
+            stopSelf()
+            return
         }
+        stayAwake = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sipspike:register")
+            .apply {
+                setReferenceCounted(false)
+                acquire(6 * 60 * 60 * 1000L)
+            }
         scope.launch {
-            combine(PhoneManager.registration, PhoneManager.call) { r, c -> r to c }
-                .collect { (reg, call) ->
-                    try {
-                        render(reg, call)
-                    } catch (t: Throwable) {
-                        // A thrown notify() used to cancel this collector, so a later hangup never
-                        // cleared the ongoing-call notification.
-                        Log.e(TAG, "render failed: ${t.javaClass.simpleName}: ${t.message}")
+            ConfigStore.lines
+                .map { lines ->
+                    lines.filter { it.enabled }.map { line ->
+                        val creds = line.resolvedCreds()
+                        Triple(line.id, creds?.first.orEmpty(), creds?.second.orEmpty())
+                    }
+                }
+                .distinctUntilChanged()
+                .collect { wanted ->
+                    engine.syncEnabledLines()
+                    if (wanted.isEmpty() || (!engine.isAwake() && engine.call.value == null)) {
+                        stopSelf()
                     }
                 }
         }
         scope.launch {
+            combine(engine.registration, engine.call) { r, c -> r to c }.collect { (reg, call) ->
+                try {
+                    render(reg, call)
+                } catch (t: Throwable) {
+                    SpikeLog.append("render failed: ${t.javaClass.simpleName}: ${t.message}")
+                }
+            }
+        }
+        scope.launch {
             while (true) {
                 delay(REGISTER_REFRESH_MS)
-                PhoneManager.refreshRegistration("timer")
+                engine.refreshRegistration("timer")
             }
         }
         scope.launch {
@@ -97,71 +113,78 @@ class PhoneService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_DECLINE -> PhoneManager.decline()
-            ACTION_HANGUP -> PhoneManager.hangup()
+            ACTION_DECLINE -> engine.decline()
+            ACTION_HANGUP -> engine.hangup()
+            ACTION_PROMOTE -> goForeground(
+                Notifications.status(this, engine.registration.value, engine.call.value),
+                mode = FgsMode.MICROPHONE,
+            )
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        networkCallback?.let {
-            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
-        }
-        networkCallback = null
         stopRing()
         stayAwake?.let { if (it.isHeld) it.release() }
-        wifiLock?.let { if (it.isHeld) it.release() }
         scope.cancel()
         super.onDestroy()
     }
 
-    private fun render(reg: Registration, call: CallState?) {
+    private fun render(reg: Registration, call: com.apex2060.softphone.CallUi?) {
         val nm = getSystemService(NotificationManager::class.java)
-        if (call?.phase == CallPhase.RINGING_IN) {
-            nm.notify(Notifications.ID_INCOMING, Notifications.incoming(this, call.number))
-            startRing(call.number)
+        val incoming = call?.takeIf { it.phase == CallPhase.RINGING_IN }
+        if (incoming != null) {
+            syncIncomingAlert(this)
+            startRing(incoming.number)
         } else {
             stopRing()
             nm.cancel(Notifications.ID_INCOMING)
         }
         if (call?.phase == CallPhase.ENDED && lastPhase != CallPhase.ENDED && call.outcome == Outcome.MISSED) {
-            nm.notify(Notifications.ID_MISSED, Notifications.missed(this, call.number))
+            nm.notify(Notifications.ID_MISSED, Notifications.missed(this, call.number, call.lineLabel))
         }
         lastPhase = call?.phase
-
         val inCall = call != null && call.phase in setOf(CallPhase.DIALING, CallPhase.RINGING_OUT, CallPhase.ACTIVE)
-        goForeground(Notifications.status(this, reg, call), mic = inCall)
+        val callChrome = inCall || incoming != null
+        if (callNotificationPosted && !callChrome) {
+            // Updating a CallStyle notification in place leaves the lock-screen
+            // chronometer running. Remove it, then post the idle status.
+            dismissCallNotifications(nm)
+        }
+        callNotificationPosted = callChrome
+        val mode = modeFor(call)
+        if (mode == null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        goForeground(Notifications.status(this, reg, call), mode = mode)
+    }
+
+    private fun dismissCallNotifications(nm: NotificationManager) {
+        nm.cancel(Notifications.ID_INCOMING)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        nm.cancel(Notifications.ID_SERVICE)
+        SpikeLog.append("cleared call notification and lock-screen timer")
     }
 
     private fun startRing(number: String) {
         if (ringing) return
         ringing = true
         val fullScreen = Notifications.canUseFullScreenIntent(this)
-        val foreground = PhoneManager.isAppForeground()
-        Log.i(
-            TAG,
-            "ring start from=$number foreground=$foreground fullScreenIntent=$fullScreen " +
-                "notifications=${Notifications.notificationsAllowed(this)} " +
-                "batteryUnrestricted=${Notifications.batteryUnrestricted(this)} " +
-                PhoneManager.registrationSnapshot(),
-        )
+        val foreground = engine.isAppForeground()
+        SpikeLog.append("ring start from=$number foreground=$foreground fullScreenIntent=$fullScreen")
         val mode = getSystemService(AudioManager::class.java).ringerMode
         if (mode != AudioManager.RINGER_MODE_SILENT) startVibration()
         if (mode == AudioManager.RINGER_MODE_NORMAL) startTone()
         wakeScreen()
-        // Full-screen intent is the reliable path while backgrounded, and only when Android 14+
-        // has actually granted it. Otherwise open the call screen ourselves (foreground, or as a
-        // best-effort when the system will not).
         if (foreground || !fullScreen) {
-            Log.i(TAG, "opening call screen foreground=$foreground fullScreenIntent=$fullScreen")
             runCatching {
                 startActivity(
                     Intent(this, CallActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 )
-            }.onFailure { Log.w(TAG, "opening call screen blocked: ${it.javaClass.simpleName}") }
-        } else {
-            Log.i(TAG, "call screen left to fullScreenIntent")
+            }.onFailure { SpikeLog.append("opening call screen blocked: ${it.javaClass.simpleName}") }
         }
     }
 
@@ -180,7 +203,7 @@ class PhoneService : Service() {
                 prepare()
                 start()
             }
-        }.onFailure { Log.w(TAG, "ringtone failed: ${it.javaClass.simpleName}") }.getOrNull()
+        }.getOrNull()
     }
 
     private fun startVibration() {
@@ -190,20 +213,15 @@ class PhoneService : Service() {
             @Suppress("DEPRECATION")
             getSystemService(Vibrator::class.java)
         }
-        val pattern = longArrayOf(0, 800, 600, 800, 600)
-        runCatching {
-            vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
-        }.onFailure { Log.w(TAG, "vibrate failed: ${it.javaClass.simpleName}") }
+        runCatching { vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 800, 600, 800, 600), 0)) }
     }
 
     @Suppress("DEPRECATION")
     private fun wakeScreen() {
         val pm = getSystemService(PowerManager::class.java)
         screenWake = pm.newWakeLock(
-            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
-                PowerManager.ACQUIRE_CAUSES_WAKEUP or
-                PowerManager.ON_AFTER_RELEASE,
-            "softphone:ring",
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
+            "sipspike:ring",
         ).apply { acquire(20_000) }
     }
 
@@ -217,100 +235,173 @@ class PhoneService : Service() {
         screenWake = null
     }
 
-    /** CPU and wifi stay up so the 120s REGISTER and UDP keepalive survive Doze. */
-    @Suppress("DEPRECATION")
-    private fun acquireKeepAlive() {
-        val pm = getSystemService(PowerManager::class.java)
-        stayAwake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "softphone:register").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
-        val mode = if (Build.VERSION.SDK_INT >= 29) {
-            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-        } else {
-            WifiManager.WIFI_MODE_FULL_HIGH_PERF
-        }
-        wifiLock = runCatching {
-            applicationContext.getSystemService(WifiManager::class.java)
-                ?.createWifiLock(mode, "softphone:register")
-                ?.apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-        }.onFailure { Log.w(TAG, "wifi lock failed: ${it.javaClass.simpleName}") }.getOrNull()
-        Log.i(TAG, "keep-alive held wake=${stayAwake?.isHeld == true} wifi=${wifiLock?.isHeld == true}")
-    }
+    private fun idleMode(): FgsMode = FgsMode.SHORT
 
-    private fun watchNetwork() {
-        val cm = getSystemService(ConnectivityManager::class.java)
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                val kind = networkKind(cm, network)
-                scope.launch { PhoneManager.onDefaultNetwork(kind) }
-            }
-
-            override fun onLost(network: Network) {
-                scope.launch { PhoneManager.onDefaultNetwork("none") }
-            }
-        }
-        runCatching { cm.registerDefaultNetworkCallback(callback) }
-            .onSuccess { networkCallback = callback }
-            .onFailure { Log.w(TAG, "network callback failed: ${it.javaClass.simpleName}") }
-    }
-
-    private fun networkKind(cm: ConnectivityManager, network: Network): String {
-        val caps = cm.getNetworkCapabilities(network) ?: return "other"
+    /** Microphone only while a call is up and the app is on screen. Ringing stays a short service. */
+    private fun modeFor(call: com.apex2060.softphone.CallUi?): FgsMode? {
+        val phase = call?.phase
+        val outgoing = phase == CallPhase.DIALING || phase == CallPhase.RINGING_OUT
+        val answered = phase == CallPhase.ACTIVE && engine.isAppForeground()
         return when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-            else -> "other"
+            outgoing || answered -> FgsMode.MICROPHONE
+            phase == CallPhase.RINGING_IN || engine.isAwake() -> FgsMode.SHORT
+            else -> null
         }
     }
 
-    private fun goForeground(notification: android.app.Notification, mic: Boolean) {
-        val base = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-        val withMic = if (mic && Build.VERSION.SDK_INT >= 30) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else base
+    private fun goForeground(notification: android.app.Notification, mode: FgsMode) {
+        val type = when (mode) {
+            FgsMode.SHORT -> if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE else 0
+            FgsMode.MICROPHONE -> if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+        }
         try {
-            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, withMic)
+            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, type)
+            SpikeLog.append("fgs ${mode.name.lowercase()}")
         } catch (e: Exception) {
-            // The microphone type is refused when the app isn't visible; keep the service alive regardless.
-            Log.w(TAG, "foreground with mic refused: ${e.message}")
-            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, base)
+            val fallback = if (Build.VERSION.SDK_INT >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE
+            } else {
+                0
+            }
+            SpikeLog.append("fgs ${mode.name.lowercase()} refused: ${e.javaClass.simpleName}: ${e.message}")
+            ServiceCompat.startForeground(this, Notifications.ID_SERVICE, notification, fallback)
         }
     }
 
     private suspend fun refreshIfDue() {
-        val cfg = ConfigStore.config.value ?: return
-        val ticket = ConfigStore.ticket ?: return
-        if (cfg.refreshHours == 0) return
-        if (System.currentTimeMillis() - ConfigStore.refreshedAt < cfg.refreshHours * 3_600_000L) return
-        try {
-            val (json, next) = Provisioner.fetch(ticket)
-            ConfigStore.save(ticket, json, next)
-        } catch (e: RevokedException) {
-            deprovision(this)
-        } catch (e: Exception) {
-            Log.w(TAG, "config refresh failed: ${e.message}")
+        val now = System.currentTimeMillis()
+        for (line in ConfigStore.lines.value) {
+            val ticket = line.ticket ?: continue
+            if (line.config.refreshHours == 0) continue
+            if (now - line.refreshedAt < line.config.refreshHours * 3_600_000L) continue
+            try {
+                val (json, next) = Provisioner.fetch(ticket)
+                ConfigStore.updateDocument(line.id, ticket, json, next)
+                PushRuntime.sync(this)
+                SpikeLog.append("provision refresh saved title=${next.title} refreshHours=${next.refreshHours}")
+            } catch (e: RevokedException) {
+                SpikeLog.append("provision revoked user=${line.config.sipUsername}")
+                removeLine(this, line.id)
+            } catch (e: Exception) {
+                SpikeLog.append("provision refresh failed: ${e.message}")
+            }
         }
     }
 
     companion object {
-        private const val TAG = "PhoneService"
         private const val REGISTER_REFRESH_MS = 90_000L
-        const val ACTION_DECLINE = "com.apex2060.softphone.DECLINE"
-        const val ACTION_HANGUP = "com.apex2060.softphone.HANGUP"
+        const val ACTION_DECLINE = "${BuildConfig.APPLICATION_ID}.DECLINE"
+        const val ACTION_HANGUP = "${BuildConfig.APPLICATION_ID}.HANGUP"
+        const val ACTION_PUSH = "${BuildConfig.APPLICATION_ID}.PUSH"
+        const val ACTION_PROMOTE = "${BuildConfig.APPLICATION_ID}.PROMOTE"
 
-        fun start(context: Context) {
-            ContextCompat.startForegroundService(context, Intent(context, PhoneService::class.java))
+        @Volatile
+        var nextMode: FgsMode? = null
+
+        /**
+         * Heads-up plus full-screen intent only when the call screen is not already
+         * in front of an unlocked phone. Answer and decline both end the ring, and
+         * [render] cancels this notification.
+         */
+        fun syncIncomingAlert(context: Context) {
+            val app = context.applicationContext as SoftphoneApp
+            val nm = context.getSystemService(NotificationManager::class.java)
+            val incoming = app.engine.call.value?.takeIf { it.phase == CallPhase.RINGING_IN }
+            if (incoming == null) {
+                nm.cancel(Notifications.ID_INCOMING)
+                return
+            }
+            val locked = context.getSystemService(KeyguardManager::class.java).isKeyguardLocked
+            if (!app.engine.isAppForeground() || locked) {
+                val who = incoming.callerName?.ifBlank { null } ?: incoming.number
+                nm.notify(Notifications.ID_INCOMING, Notifications.incoming(context, who, incoming.lineLabel))
+            } else {
+                nm.cancel(Notifications.ID_INCOMING)
+            }
         }
 
-        /** Returns the phone to its factory state: only the QR scanner remains. */
-        fun deprovision(context: Context) {
-            PhoneManager.logout()
-            CallHistory.clear()
-            ConfigStore.clear()
-            context.getSystemService(NotificationManager::class.java).cancelAll()
+        /** High-priority FCM wake. shortService keeps the process up until the user answers. */
+        fun startForPush(context: Context) {
+            nextMode = FgsMode.SHORT
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_PUSH),
+            )
+        }
+
+        /** Outgoing call from the dialer, which is already on screen. */
+        fun startForOutgoing(context: Context) {
+            nextMode = FgsMode.MICROPHONE
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_PROMOTE),
+            )
+        }
+
+        /** Answer screen became visible, so the microphone type is allowed. */
+        fun promoteMicrophone(context: Context) {
+            val phase = (context.applicationContext as SoftphoneApp).engine.call.value?.phase ?: return
+            if (phase != CallPhase.ACTIVE && phase != CallPhase.DIALING && phase != CallPhase.RINGING_OUT) return
+            nextMode = FgsMode.MICROPHONE
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, PhoneService::class.java).setAction(ACTION_PROMOTE),
+            )
+        }
+
+        fun considerIdle(context: Context) {
+            val app = context.applicationContext as SoftphoneApp
+            val call = app.engine.call.value
+            val inCall = call != null && call.phase != CallPhase.ENDED
+            if (app.engine.isAwake() || inCall) return
+            context.stopService(Intent(context, PhoneService::class.java))
+        }
+
+        fun turnOn(context: Context, lineId: String) {
+            ConfigStore.setEnabled(lineId, true)
+            PushRuntime.sync(context.applicationContext)
+        }
+
+        fun turnOff(context: Context, lineId: String) {
+            ConfigStore.setEnabled(lineId, false)
+            (context.applicationContext as SoftphoneApp).engine.turnOff(lineId)
+            if (!ConfigStore.anyEnabled()) {
+                context.stopService(Intent(context, PhoneService::class.java))
+            } else {
+                considerIdle(context)
+            }
+        }
+
+        /** Unregisters this phone and deletes it on this device. Other phones stay. */
+        fun removeLine(context: Context, lineId: String) {
+            (context.applicationContext as SoftphoneApp).engine.turnOff(lineId)
+            ConfigStore.remove(lineId)
+            if (!ConfigStore.anyEnabled()) {
+                context.stopService(Intent(context, PhoneService::class.java))
+            } else {
+                considerIdle(context)
+            }
+            if (ConfigStore.lines.value.isEmpty()) {
+                context.getSystemService(NotificationManager::class.java).cancel(Notifications.ID_SERVICE)
+            }
+        }
+
+        /** Removes this phone and its call history. Other phones stay. */
+        fun resetLine(context: Context, lineId: String) {
+            val doomed = CallHistory.records.value.filter { it.lineId == lineId }.map { it.id }.toSet()
+            Recordings.discardIfHistory(context, doomed)
+            val app = context.applicationContext as SoftphoneApp
+            app.engine.turnOff(lineId)
+            CallHistory.clearLine(lineId)
+            ConfigStore.remove(lineId)
+            if (!ConfigStore.anyEnabled()) {
+                context.stopService(Intent(context, PhoneService::class.java))
+            } else {
+                considerIdle(context)
+            }
+            if (ConfigStore.lines.value.isEmpty()) {
+                context.getSystemService(NotificationManager::class.java).cancelAll()
+            }
         }
     }
 }

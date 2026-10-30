@@ -1,8 +1,8 @@
 # Provisioning
 
-A fresh install shows only a QR scanner. Scanning a setup code makes the phone fetch a JSON
-document from your server, save it, register with Plivo, and switch to the dialer. The phone
-stays provisioned across reboots and app updates until it is reset or revoked.
+A fresh install opens the phone list. Tap Add phone and scan a setup code. The phone fetches a
+JSON document from your server, saves it, registers with Plivo, and returns to the list. The
+phone stays provisioned across reboots and app updates until it is reset or revoked.
 
 ## 1. The QR code
 
@@ -28,7 +28,15 @@ X-Provision-Key: front-desk-7f3a9c
 for example `https://phones.example.com/provision?key=front-desk-7f3a9c`.
 
 Release builds only accept `https://` URLs. Debug builds also accept `http://` so you can test
-against a laptop on the LAN.
+against a laptop on the LAN. A setup link only accepts ticket hosts `a.alphabetize.us`,
+`us.ed22.org`, and `my.latterday.works`.
+
+A tap link carries that same JSON, base64url-encoded, as `t`:
+
+* `phone22://setup?t=<base64url>`
+* `https://a.alphabetize.us/22phone/setup#t=<base64url>` (`t` in the query is also accepted)
+
+The phone asks before it saves the line. A bad link is not logged.
 
 Generate a code with any QR tool, for example:
 
@@ -91,22 +99,87 @@ Respond `200` with `application/json`. Only `sip.username` and `sip.password` ar
 | `historyLimit` | int | `200` | Calls kept on the device (10 to 5000). |
 | `adminPin` | string | none | PIN needed to reset the phone. With no PIN, reset only asks for confirmation. |
 | `refreshHours` | int | `24` | How often the phone re-fetches this document with the same ticket, so you can rotate credentials or colors remotely. `0` turns refresh off. |
+| `push` | object | none | Optional Firebase Android client for this server. See below. |
 
 Colors are `#RRGGBB` or `#AARRGGBB`. Unknown fields are ignored, and a bad color falls back to
 its default.
+
+### Push
+
+Lines can be provisioned from different servers, and each server can send pushes from its own
+Firebase project. The values are the public Android client config, not a server secret. Use
+placeholders in examples. Do not put a real key in this document.
+
+```json
+"push": {
+  "projectId": "example-project",
+  "applicationId": "1:000000000000:android:0000000000000000000000",
+  "apiKey": "AIzaSyEXAMPLEEXAMPLEEXAMPLEEXAMPLE",
+  "gcmSenderId": "000000000000"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `projectId` | Firebase project id. The phone keeps one named Firebase app per id and reuses it for every line that names the same project. |
+| `applicationId` | `mobilesdk_app_id` (`1:<sender>:android:<hash>`). |
+| `apiKey` | Android API key for that Firebase project. |
+| `gcmSenderId` | Sender id, the numeric project number. |
+
+If `push` is missing or any field is blank, the phone does not create a secondary app for that
+line. It then uses the default Firebase app from `google-services.json` when this build has one.
+That file must contain `package_name` `us.alphabetize.phone22`. If neither exists, push is off
+for that line and the phone keeps its registration open instead.
+
+The phone asks Firebase for that app's token and sends it only to this line's provision origin:
+
+* on `phone.provision`, once a token for that project is already known (the first scan often
+  omits it, because the project is inside this response)
+* on `POST {same url with action=phone.token}` with
+  `{"key","fcmToken","platform":"android","appVersion","deviceId"}`
+
+`deviceId` is a random UUID stored on the install. HTTP 410 still revokes that line.
+
+Data messages are delivered to one messaging service for every sender. Include `endpoint`
+(the SIP username) and `origin` (the provision host, such as `https://us.ed22.org`) so the phone
+can pick the line. `callUuid` still identifies the call. If both `endpoint` and `origin` are
+absent, any switched-on line may be woken, narrowed by `to` when that matches a number.
+
+The caller's digits are `caller`. FCM v1 rejects a data key named `from`, so do not send that
+name. The phone still accepts `from` only as a legacy fallback when `caller` is missing.
+
+```json
+{
+  "type": "incoming_call",
+  "callUuid": "example-call",
+  "caller": "15551234567",
+  "fromName": "Ada",
+  "to": "15557654321",
+  "endpoint": "frontdesk123456789",
+  "origin": "https://phones.example.com",
+  "ts": "1729530000000"
+}
+```
+
+`cancel` uses the same `callUuid`, `endpoint`, and `origin`. The phone matches an INVITE header
+named `X-Call-UUID` or any `X-PH-` header whose name contains `Call-UUID`, case-insensitive.
 
 ### Status codes
 
 | Status | Phone behaviour |
 |---|---|
 | `200` | Save the document and (re)register. |
-| `410 Gone` | The phone wipes its line and history and returns to the scanner. Use this to retire a device. |
+| `410 Gone` | The phone removes that line and its history. Use this to retire a device. |
 | anything else | Setup shows the error; a background refresh keeps the current config and tries again later. |
 
-## 3. Resetting a phone
+## 3. Removing a phone
 
-Long-press the coloured title bar and enter the admin PIN. This removes the line and the call
-history and returns to the scanner.
+Each phone on the list has Remove. Confirming it unregisters that line and deletes its saved
+setup and call history on this device. Turning auto-record on asks for a confirmation.
+Neither action asks for an admin PIN.
+
+`v` and `c` query parameters on a setup URL are removed before every `phone.*` request,
+including URLs saved from an earlier scan. Host and path stay. The request keeps `action`.
 
 ## 4. Plivo side
 

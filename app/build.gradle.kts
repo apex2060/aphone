@@ -1,10 +1,14 @@
+import org.gradle.api.tasks.testing.Test
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services") apply false
 }
+
+val pushEnabled = file("google-services.json").exists()
 
 // CI passes these. A local build keeps the defaults.
 //   ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=42
@@ -12,21 +16,23 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.0.0"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 1
+    ?: "1.3.12"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 33
 
 android {
     namespace = "com.apex2060.softphone"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.apex2060.softphone"
+        applicationId = "us.alphabetize.phone22"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = releaseVersionCode
         versionName = releaseVersionName
-        // Phones only: dropping x86 builds of the WebRTC libs roughly halves the APK.
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        // PJSIP is built for arm64. v1.0.5 also shipped armeabi-v7a via the Plivo SDK.
+        ndk { abiFilters += listOf("arm64-v8a") }
+        // True only for a build that had app/google-services.json. Push stays off otherwise.
+        buildConfigField("boolean", "PUSH_ENABLED", pushEnabled.toString())
     }
 
     val keystorePath = System.getenv("ANDROID_KEYSTORE_FILE")
@@ -51,8 +57,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // R8 renaming breaks pjsua2's SWIG callbacks. The signing config is unchanged.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Never fall back to the debug key. checkReleaseSigning fails the build when
             // the stable keystore is missing, so an unsigned APK is not produced either.
@@ -70,6 +77,20 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    sourceSets {
+        getByName("main") {
+            java.srcDir("../sipspike/src/main/java/org")
+            assets.srcDir("../sipspike/src/main/assets")
+            jniLibs.srcDir("../sipspike/src/main/jniLibs")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
@@ -112,9 +133,12 @@ kotlin {
     compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
 }
 
-dependencies {
-    implementation("com.plivo.endpoint:endpoint:3.2.2-beta")
+tasks.withType<Test>().configureEach {
+    // android.jar stubs org.json.JSONObject. Put the real library ahead of it.
+    classpath = files(classpath.filter { it.name.startsWith("json-") }) + classpath
+}
 
+dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.activity:activity-compose:1.10.1")
@@ -132,4 +156,43 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.zxing:core:3.5.3")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
+if (pushEnabled) {
+    // The plugin selects client[].client_info.android_client_info.package_name == applicationId.
+    // Fail here, before that task, when the file has no such client.
+    val expectedPackage = android.defaultConfig.applicationId
+        ?: throw GradleException("applicationId is not set.")
+    val servicesFile = file("google-services.json")
+    val parsed = try {
+        @Suppress("UNCHECKED_CAST")
+        groovy.json.JsonSlurper().parse(servicesFile) as Map<*, *>
+    } catch (e: Exception) {
+        throw GradleException(
+            "app/google-services.json is not valid JSON. CI secret GOOGLE_SERVICES_JSON_BASE64 " +
+                "must be a base64-encoded google-services.json with an Android client whose " +
+                "package_name is $expectedPackage.",
+            e,
+        )
+    }
+    val packages = (parsed["client"] as? List<*>).orEmpty().mapNotNull { client ->
+        val info = (client as? Map<*, *>)?.get("client_info") as? Map<*, *>
+        val androidInfo = info?.get("android_client_info") as? Map<*, *>
+        androidInfo?.get("package_name") as? String
+    }
+    if (expectedPackage !in packages) {
+        val shown = if (packages.isEmpty()) "(none)" else packages.joinToString(", ")
+        throw GradleException(
+            "app/google-services.json has no Android client with package_name $expectedPackage " +
+                "(found: $shown). CI secret GOOGLE_SERVICES_JSON_BASE64 must include that client. " +
+                "The google-services plugin uses the client that matches applicationId.",
+        )
+    }
+    apply(plugin = "com.google.gms.google-services")
 }
