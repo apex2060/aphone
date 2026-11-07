@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Icon
@@ -51,7 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -106,6 +109,7 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
     val statuses by engine.statuses.collectAsState()
     var place by remember { mutableStateOf<Place>(Place.Phones) }
     var resetId by remember { mutableStateOf<String?>(null) }
+    SystemBarIcons(lightBackground = place is Place.Phones)
 
     fun dial(number: String, lineId: String) {
         val line = ConfigStore.line(lineId)
@@ -136,6 +140,7 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
         )
         else -> {
             val dialerId = (here as? Place.Dialer)?.lineId
+            val onMain = dialerId == null
             if (dialerId != null) BackHandler { place = Place.Phones }
             Column(Modifier.fillMaxSize()) {
                 PhoneAppBar(
@@ -144,6 +149,8 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
                     onNetwork = {
                         place = if (dialerId != null) Place.LineSettings(dialerId) else Place.Settings
                     },
+                    bar = if (onMain) Color(MainChrome.TOOLBAR) else Color(ProvisionConfig.DEFAULT_THEME.primary),
+                    onBar = if (onMain) Color(MainChrome.ON_CHROME) else Color(ProvisionConfig.DEFAULT_THEME.onPrimary),
                 )
                 val call by engine.call.collectAsState()
                 if (call != null && call?.phase != CallPhase.ENDED) {
@@ -158,15 +165,22 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
                             .padding(12.dp),
                     )
                 }
-                if (dialerId == null) {
-                    PhoneList(
-                        stored,
-                        statuses,
-                        onOpen = { place = Place.Dialer(it) },
-                        onRemove = { resetId = it },
-                        onAdd = onAdd,
-                        modifier = Modifier.weight(1f),
-                    )
+                if (onMain) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .background(mainFieldBrush()),
+                    ) {
+                        PhoneList(
+                            stored,
+                            statuses,
+                            onOpen = { place = Place.Dialer(it) },
+                            onRemove = { resetId = it },
+                            onAdd = onAdd,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 } else {
                     Box(Modifier.weight(1f)) {
                         val line = stored.firstOrNull { it.id == dialerId }
@@ -188,17 +202,25 @@ fun HomeScreen(onOpenCall: () -> Unit, onAdd: () -> Unit) {
     }
 }
 
+/** Horizontal field sampled from the artwork: light cyan, cream, warm gold. */
+private fun mainFieldBrush() = Brush.horizontalGradient(
+    0f to Color(MainChrome.TOOLBAR),
+    MainChrome.CREAM_STOP to Color(MainChrome.CREAM),
+    1f to Color(MainChrome.GOLD),
+)
+
 @Composable
 fun PhoneAppBar(
     engine: SipEngine,
     onTitle: (() -> Unit)?,
     onNetwork: (() -> Unit)?,
+    bar: Color = Color(ProvisionConfig.DEFAULT_THEME.primary),
+    onBar: Color = Color(ProvisionConfig.DEFAULT_THEME.onPrimary),
 ) {
     val network by engine.network.collectAsState()
     val detected = UiText.networkIndicator(network)
     val label = detected.ifBlank { "Network" }
-    val bar = Color(ProvisionConfig.DEFAULT_THEME.primary)
-    val onBar = Color(ProvisionConfig.DEFAULT_THEME.onPrimary)
+    val quiet = if (onBar.luminance() < 0.5f) MainChrome.TOOLBAR_QUIET_ALPHA else 0.75f
     Row(
         Modifier
             .fillMaxWidth()
@@ -221,7 +243,7 @@ fun PhoneAppBar(
         Spacer(Modifier.weight(1f))
         Text(
             label,
-            color = onBar.copy(alpha = if (detected.isEmpty()) 0.75f else 0.9f),
+            color = onBar.copy(alpha = if (detected.isEmpty()) quiet else 0.9f),
             style = MaterialTheme.typography.labelLarge,
             modifier = if (onNetwork != null) {
                 Modifier.clickable(onClickLabel = "Settings", onClick = onNetwork)
@@ -254,7 +276,7 @@ private fun PhoneList(
                     "All phones are off",
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
                     textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color(MainChrome.ON_CHROME_MUTED),
                 )
             }
         }
@@ -312,23 +334,34 @@ private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
             "No phones yet",
             style = MaterialTheme.typography.headlineSmall,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onBackground,
+            color = Color(MainChrome.ON_CHROME),
         )
         Text(
             "Ask your business manager for a QR code to set up your phone.",
             modifier = Modifier.padding(top = 8.dp),
             style = MaterialTheme.typography.bodyLarge,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(MainChrome.ON_CHROME_MUTED),
         )
         AddPhoneButton(onClick = onAdd, modifier = Modifier.padding(top = 24.dp))
-        OutlinedCard(Modifier.fillMaxWidth().padding(top = 28.dp)) {
+        OutlinedCard(
+            Modifier.fillMaxWidth().padding(top = 28.dp),
+            colors = CardDefaults.outlinedCardColors(
+                containerColor = Color.White,
+                contentColor = Color(MainChrome.ON_CHROME),
+            ),
+        ) {
             Column(Modifier.padding(16.dp)) {
-                Text("New to 22 Phone?", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "New to 22 Phone?",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color(MainChrome.ON_CHROME),
+                )
                 Text(
                     "22 Phone connects to phone lines you set up on Alphabetize. Create an account, add a number and a phone there, then tap Add phone and scan the QR code it shows.",
                     modifier = Modifier.padding(top = 8.dp),
                     style = MaterialTheme.typography.bodyMedium,
+                    color = Color(MainChrome.ON_CHROME_MUTED),
                 )
                 TextButton(
                     onClick = {
