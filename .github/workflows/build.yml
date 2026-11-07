@@ -160,30 +160,14 @@ jobs:
             if [ -n "${VERSION_INPUT}" ]; then
               version_name="${VERSION_INPUT#v}"
             elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-              version_name="$(python3 - <<'PY'
-import pathlib, re, sys
-text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
-match = re.search(r'\?: "(\d+\.\d+\.\d+)"', text)
-if not match:
-    sys.exit("versionName default was not found in app/build.gradle.kts")
-print(match.group(1))
-PY
-)"
+              version_name="$(python3 scripts/default-release-version.py name)"
             else
               version_name="0.0.${GITHUB_RUN_NUMBER}"
             fi
             if [ -n "${VERSION_CODE_INPUT}" ]; then
               version_code="${VERSION_CODE_INPUT}"
             elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-              version_code="$(python3 - <<'PY'
-import pathlib, re, sys
-text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
-match = re.search(r'toIntOrNull\(\) \?: (\d+)', text)
-if not match:
-    sys.exit("versionCode default was not found in app/build.gradle.kts")
-print(match.group(1))
-PY
-)"
+              version_code="$(python3 scripts/default-release-version.py code)"
             else
               version_code="${GITHUB_RUN_NUMBER}"
             fi
