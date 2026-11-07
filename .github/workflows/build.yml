@@ -16,7 +16,8 @@ on:
         required: false
         type: string
 
-# Release creation needs contents: write. Pull-request builds only compile.
+# Release creation needs contents: write. Pull requests also run the release
+# job so the signed App Bundle is built with the Firebase config.
 permissions:
   contents: read
 
@@ -64,7 +65,6 @@ jobs:
         run: ./gradlew --no-daemon assembleDebug
 
   release:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -159,11 +159,31 @@ jobs:
           else
             if [ -n "${VERSION_INPUT}" ]; then
               version_name="${VERSION_INPUT#v}"
+            elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+              version_name="$(python3 - <<'PY'
+import pathlib, re, sys
+text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
+match = re.search(r'\?: "(\d+\.\d+\.\d+)"', text)
+if not match:
+    sys.exit("versionName default was not found in app/build.gradle.kts")
+print(match.group(1))
+PY
+)"
             else
               version_name="0.0.${GITHUB_RUN_NUMBER}"
             fi
             if [ -n "${VERSION_CODE_INPUT}" ]; then
               version_code="${VERSION_CODE_INPUT}"
+            elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+              version_code="$(python3 - <<'PY'
+import pathlib, re, sys
+text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
+match = re.search(r'toIntOrNull\(\) \?: (\d+)', text)
+if not match:
+    sys.exit("versionCode default was not found in app/build.gradle.kts")
+print(match.group(1))
+PY
+)"
             else
               version_code="${GITHUB_RUN_NUMBER}"
             fi
@@ -199,7 +219,7 @@ jobs:
           else
             echo "PUSH_ENABLED=false"
           fi
-          ./gradlew --no-daemon assembleRelease bundleRelease \
+          ./gradlew --no-daemon :app:testDebugUnitTest assembleRelease bundleRelease \
             -PversionName="${VERSION_NAME}" \
             -PversionCode="${VERSION_CODE}"
           apk="app/build/outputs/apk/release/app-release.apk"
