@@ -80,6 +80,7 @@ fun ScanScreen(onCancel: () -> Unit) {
     LaunchedEffect(Unit) { if (!hasCamera) permission.launch(Manifest.permission.CAMERA) }
     var state by remember { mutableStateOf<ScanState>(ScanState.Scanning) }
     BackHandler { onCancel() }
+    SystemBarIcons(lightBackground = false)
 
     fun onCode(text: String) {
         if (state != ScanState.Scanning) return

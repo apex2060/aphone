@@ -4,4 +4,12 @@
         <item name="android:statusBarColor">@android:color/black</item>
         <item name="android:navigationBarColor">@android:color/black</item>
     </style>
+
+    <!-- Phone list only. CallActivity keeps the black application theme. -->
+    <style name="Theme.Softphone.Main" parent="Theme.Softphone">
+        <item name="android:windowBackground">@color/main_toolbar</item>
+        <item name="android:statusBarColor">@color/main_toolbar</item>
+        <item name="android:navigationBarColor">@color/main_gradient_gold</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
 </resources>

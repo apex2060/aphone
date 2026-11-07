@@ -44,9 +44,10 @@ class MainActivity : ComponentActivity() {
     private var setupBusy by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The phone list is a light field. The dialer, settings, and scanner switch the icons.
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
         Recordings.restoreDialog(this)
