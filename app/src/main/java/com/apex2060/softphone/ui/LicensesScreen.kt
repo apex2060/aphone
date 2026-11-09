@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 private data class LicenseEntry(val name: String, val terms: String)
 
 private val LICENSES = listOf(
-    LicenseEntry("22 Phone", "GNU GPL-2.0-or-later"),
+    LicenseEntry("A Phone", "GNU GPL-2.0-or-later"),
     LicenseEntry("PJSIP / pjproject", "GNU GPL-2.0-or-later"),
     LicenseEntry("OpenSSL", "Apache-2.0"),
     LicenseEntry("Kotlin, AndroidX, Jetpack Compose, CameraX, kotlinx.coroutines", "Apache-2.0"),
@@ -53,7 +53,7 @@ fun LicensesScreen(onBack: () -> Unit) {
             TextButton(onClick = onBack) { Text("Back") }
             Text("Open-source licenses", style = MaterialTheme.typography.titleLarge)
             Text(
-                "22 Phone is free software under the GNU GPL, version 2 or any later version. " +
+                "A Phone is free software under the GNU GPL, version 2 or any later version. " +
                     "PJSIP is GPL-2.0-or-later. OpenSSL and the Android libraries are Apache-2.0. " +
                     "Apache-2.0 can be combined with this app because the GPL grant includes later versions.",
                 style = MaterialTheme.typography.bodyMedium,

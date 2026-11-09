@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- White field behind the heart mark. The artwork is drawn for a light ground. -->
-    <color name="launcher_bg">#FFFFFF</color>
+    <!-- Adaptive-icon field, sampled from the border of the A artwork. -->
+    <color name="launcher_bg">#A6CBDF</color>
     <!-- Main phone-list field, sampled from the artwork background. Keep in step with MainChrome. -->
     <color name="main_toolbar">#6CC8FD</color>
     <color name="main_gradient_gold">#FDD496</color>
