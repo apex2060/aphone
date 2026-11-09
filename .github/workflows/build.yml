@@ -240,7 +240,7 @@ jobs:
           printf '%s\n' "$badging" | grep -F -q "package: name='us.alphabetize.phone22'"
           printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
           printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
-          printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"
+          printf '%s\n' "$badging" | grep -F -q "application-label:'A Phone'"
           zipalign="$(find "$sdk/build-tools" -type f -name zipalign | sort -V | tail -1)"
           if [ -z "$zipalign" ]; then
             echo "::error::zipalign was not found under ${sdk}."
@@ -284,7 +284,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           notes=$(printf '%s\n' \
-            "Signed 22 Phone release." \
+            "Signed A Phone release." \
             "" \
             "- versionName: ${VERSION_NAME}" \
             "- versionCode: ${VERSION_CODE}" \

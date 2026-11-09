@@ -345,18 +345,18 @@ private fun shownLog(engine: SipEngine): String = UiText.scrub(engine.logText())
 private fun copy(context: android.content.Context, engine: SipEngine) {
     val text = shownLog(engine)
     val cm = context.getSystemService(ClipboardManager::class.java)
-    cm.setPrimaryClip(ClipData.newPlainText("22 Phone log", text))
+    cm.setPrimaryClip(ClipData.newPlainText("A Phone log", text))
     Toast.makeText(context, "Log copied", Toast.LENGTH_SHORT).show()
 }
 
 private fun share(context: android.content.Context, engine: SipEngine) {
     val dir = File(context.cacheDir, "share").apply { mkdirs() }
-    val file = File(dir, "22phone-log.txt")
+    val file = File(dir, "a-phone-log.txt")
     file.writeText(shownLog(engine))
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
     val send = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
-        putExtra(Intent.EXTRA_SUBJECT, "22 Phone log")
+        putExtra(Intent.EXTRA_SUBJECT, "A Phone log")
         putExtra(Intent.EXTRA_STREAM, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }

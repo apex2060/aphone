@@ -35,7 +35,7 @@ object Notifications {
         val nm = context.getSystemService(NotificationManager::class.java)
         nm.deleteNotificationChannel("incoming")
         nm.createNotificationChannel(
-            NotificationChannel(CH_STATUS, "22 Phone", NotificationManager.IMPORTANCE_LOW).apply {
+            NotificationChannel(CH_STATUS, "A Phone", NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false)
             }
         )
@@ -56,7 +56,7 @@ object Notifications {
         )
     }
 
-    private fun title() = ConfigStore.themeLine()?.config?.title ?: "22 Phone"
+    private fun title() = ConfigStore.themeLine()?.config?.title ?: "A Phone"
 
     private fun openApp(context: Context) = PendingIntent.getActivity(
         context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE

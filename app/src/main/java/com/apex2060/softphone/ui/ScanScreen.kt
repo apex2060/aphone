@@ -147,7 +147,7 @@ fun ScanScreen(onCancel: () -> Unit) {
             color = Color.White,
         ) {
             Text(
-                "22 Phone",
+                "A Phone",
                 modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
                 style = MaterialTheme.typography.titleMedium,
                 color = Color.Black,

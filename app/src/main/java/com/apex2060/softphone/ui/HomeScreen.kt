@@ -230,7 +230,7 @@ fun PhoneAppBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            "22 Phone",
+            "A Phone",
             color = onBar,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
@@ -353,12 +353,12 @@ private fun EmptyPhones(onAdd: () -> Unit, modifier: Modifier = Modifier) {
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "New to 22 Phone?",
+                    "New to A Phone?",
                     style = MaterialTheme.typography.titleMedium,
                     color = Color(MainChrome.ON_CHROME),
                 )
                 Text(
-                    "22 Phone connects to phone lines you set up on Alphabetize. Create an account, add a number and a phone there, then tap Add phone and scan the QR code it shows.",
+                    "A Phone connects to phone lines you set up on Alphabetize. Create an account, add a number and a phone there, then tap Add phone and scan the QR code it shows.",
                     modifier = Modifier.padding(top = 8.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color(MainChrome.ON_CHROME_MUTED),

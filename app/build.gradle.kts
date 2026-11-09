@@ -16,8 +16,8 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.3.13"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 34
+    ?: "1.3.14"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 35
 
 android {
     namespace = "com.apex2060.softphone"

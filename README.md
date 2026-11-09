@@ -1,4 +1,4 @@
-# 22 Phone
+# A Phone
 
 An Android phone app. Opening it shows the list of phones. Tap Add phone and scan a
 setup code. The phone pulls its SIP credentials, title and colors from your server, registers,
@@ -57,8 +57,8 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.13` and `versionCode` defaults to `34`. A manual Build APK run
-uses the `version_name` and `version_code` inputs (for example `1.3.13` and `34`). A tag run
+`versionName` defaults to `1.3.14` and `versionCode` defaults to `35`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.14` and `35`). A tag run
 uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
 Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
 never committed.
@@ -140,7 +140,7 @@ docs/       provisioning schema
 
 ## License
 
-22 Phone is free software under the GNU General Public License, version 2 or, at your
+A Phone is free software under the GNU General Public License, version 2 or, at your
 option, any later version. See [LICENSE](LICENSE). PJSIP is GPL-2.0-or-later. OpenSSL and
 the AndroidX / Kotlin / Compose / CameraX / ZXing libraries are Apache-2.0.
 

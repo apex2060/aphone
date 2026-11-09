@@ -234,7 +234,7 @@ jobs:
           printf '%s\n' "$badging" | grep -F -q "package: name='us.alphabetize.phone22'"
           printf '%s\n' "$badging" | grep -F -q "versionCode='${VERSION_CODE}'"
           printf '%s\n' "$badging" | grep -F -q "versionName='${VERSION_NAME}'"
-          printf '%s\n' "$badging" | grep -F -q "application-label:'22 Phone'"
+          printf '%s\n' "$badging" | grep -F -q "application-label:'A Phone'"
           python3 sipspike/third_party/check-elf-alignment.py dist/22phone.apk
           zipalign="$(find "$sdk/build-tools" -type f -name zipalign | sort -V | tail -1)"
           if [ -z "$zipalign" ]; then
@@ -353,12 +353,12 @@ jobs:
           if [ "${OFFICIAL}" = "true" ]; then
             assets=(dist/22phone.apk dist/22phone.aab)
             notes=$(printf '%s\n' \
-              "Signed 22 Phone test build. This is not a v* release and it is not merged." \
+              "Signed A Phone test build. This is not a v* release and it is not merged." \
               "" \
               "- package: us.alphabetize.phone22" \
               "- versionName: ${VERSION_NAME}" \
               "- versionCode: ${VERSION_CODE}" \
-              "- label: 22 Phone" \
+              "- label: A Phone" \
               "- targetSdk: 36" \
               "- PJSIP 2.17 (GPL-2.0-or-later) and OpenSSL 3.5.4 (Apache-2.0)" \
               "" \
