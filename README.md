@@ -57,11 +57,15 @@ export ANDROID_KEY_PASSWORD='...'
 ./gradlew assembleRelease -PversionName=1.0.1 -PversionCode=2
 ```
 
-`versionName` defaults to `1.3.14` and `versionCode` defaults to `35`. A manual Build APK run
-uses the `version_name` and `version_code` inputs (for example `1.3.14` and `35`). A tag run
+`versionName` defaults to `1.3.15` and `versionCode` defaults to `36`. A manual Build APK run
+uses the `version_name` and `version_code` inputs (for example `1.3.15` and `36`). A tag run
 uses the tag name (`v1.0.1` becomes `1.0.1`) and the GitHub Actions run number instead.
 Pass `-PversionName` and `-PversionCode` to override either value locally. The keystore is
 never committed.
+
+Release builds are shrunk and obfuscated with R8 (`app/proguard-rules.pro`). The deobfuscation
+map is `app/build/outputs/mapping/release/mapping.txt`; it is embedded in the AAB for Play and
+CI uploads it as the `22phone-mapping` artifact. Keep the mapping for every build you ship.
 
 ### One-time signing setup
 

@@ -16,8 +16,8 @@ val releaseVersionName = (findProperty("versionName") as String?)
     ?.trim()
     ?.removePrefix("v")
     ?.ifBlank { null }
-    ?: "1.3.14"
-val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 35
+    ?: "1.3.15"
+val releaseVersionCode = (findProperty("versionCode") as String?)?.trim()?.toIntOrNull() ?: 36
 
 android {
     namespace = "com.apex2060.softphone"
@@ -57,9 +57,12 @@ android {
 
     buildTypes {
         release {
-            // R8 renaming breaks pjsua2's SWIG callbacks. The signing config is unchanged.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // R8 shrinks and obfuscates the release build (Play's DEX optimization check).
+            // pjsua2's SWIG/JNI classes and their app subclasses are kept by proguard-rules.pro.
+            // The mapping file is at app/build/outputs/mapping/release/mapping.txt; CI uploads
+            // it as an artifact and the AAB carries it for Play deobfuscation.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Never fall back to the debug key. checkReleaseSigning fails the build when
             // the stable keystore is missing, so an unsigned APK is not produced either.
@@ -143,6 +146,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    // Play flagged the transitive androidx.fragment 1.1.0 (from Play services) as outdated.
+    implementation("androidx.fragment:fragment:1.8.9")
 
     val composeBom = platform("androidx.compose:compose-bom:2025.05.00")
     implementation(composeBom)
